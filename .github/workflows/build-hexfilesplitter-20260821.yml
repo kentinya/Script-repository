@@ -1,0 +1,66 @@
+name: Build HexFileSplitter Windows EXE
+
+on:
+  push:
+    branches:
+      - build/hex-file-splitter-win-20260821-01
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    name: Build Windows x64 executable
+    runs-on: windows-2022
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        working-directory: builds/HexFileSplitter_Windows_20260821
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Install build dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pyinstaller>=6.0,<7.0" "tkinterdnd2>=0.4.2,<0.5"
+
+      - name: Build single-file GUI executable
+        shell: pwsh
+        run: python -m PyInstaller --noconfirm --clean hex_file_splitter_gui.spec
+
+      - name: Verify executable and create checksum
+        shell: pwsh
+        run: |
+          $exe = "dist\HexFileSplitter.exe"
+          if (-not (Test-Path $exe)) {
+            throw "Expected executable was not generated: $exe"
+          }
+          $size = (Get-Item $exe).Length
+          if ($size -lt 1MB) {
+            throw "Generated executable is unexpectedly small: $size bytes"
+          }
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  HexFileSplitter.exe" | Set-Content -Encoding ascii "dist\HexFileSplitter.exe.sha256"
+          Write-Host "EXE size: $size bytes"
+          Write-Host "SHA256: $hash"
+
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: HexFileSplitter-Windows-x64
+          path: |
+            builds/HexFileSplitter_Windows_20260821/dist/HexFileSplitter.exe
+            builds/HexFileSplitter_Windows_20260821/dist/HexFileSplitter.exe.sha256
+          if-no-files-found: error
+          retention-days: 7
