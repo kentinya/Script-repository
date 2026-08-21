@@ -36,12 +36,12 @@ echo.
 echo [3/4] 安装构建依赖...
 python -m pip install --upgrade pip
 if errorlevel 1 goto failed
-python -m pip install "pyinstaller>=6.0" "tkinterdnd2>=0.4.2"
+python -m pip install "pyinstaller>=6.0" "PySide6-Essentials>=6.8,<7.0"
 if errorlevel 1 goto failed
 
 echo.
 echo [4/4] 生成单文件 EXE...
-python -m PyInstaller --noconfirm --clean "hex_file_splitter_gui.spec"
+python -m PyInstaller --noconfirm --clean "hex_file_splitter_qt.spec"
 if errorlevel 1 goto failed
 
 echo.
