@@ -452,6 +452,13 @@ class HexSplitterApp:
 
 
 def main():
+    if "--self-test" in sys.argv:
+        root = TkinterDnD.Tk() if DND_AVAILABLE else tk.Tk()
+        root.withdraw()
+        root.update_idletasks()
+        root.destroy()
+        return
+
     HexSplitterApp().run()
 
 
