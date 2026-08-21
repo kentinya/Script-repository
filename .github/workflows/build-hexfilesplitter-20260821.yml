@@ -36,31 +36,28 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "pyinstaller>=6.0,<7.0" "tkinterdnd2>=0.4.2,<0.5"
+          python -m pip install "pyinstaller>=6.0,<7.0" "PySide6-Essentials>=6.8,<7.0"
 
       - name: Build single-file GUI executable
         shell: pwsh
-        run: python -m PyInstaller --noconfirm --clean hex_file_splitter_gui.spec
+        run: python -m PyInstaller --noconfirm --clean hex_file_splitter_qt.spec
 
-      - name: Inspect bundled Tcl/Tk runtime
+      - name: Inspect bundled Qt platform runtime
         shell: pwsh
         run: |
           $archive = pyi-archive_viewer -l "dist\HexFileSplitter.exe" | Out-String
-          if ($archive -notmatch '_tcl_data[\\/]+init\.tcl') {
-            throw "init.tcl is missing from the executable"
-          }
-          if ($archive -notmatch '_tk_data[\\/]+tk\.tcl') {
-            throw "tk.tcl is missing from the executable"
+          if ($archive -notmatch 'PySide6[\\/]+plugins[\\/]+platforms[\\/]+qwindows\.dll') {
+            throw "The Windows Qt platform plugin is missing from the executable"
           }
 
-      - name: Run Tcl/Tk and drag-and-drop self-test
+      - name: Run Qt GUI runtime self-test
         shell: pwsh
         run: |
           $exe = (Resolve-Path "dist\HexFileSplitter.exe").Path
           $process = Start-Process -FilePath $exe -ArgumentList "--self-test" -PassThru
           if (-not $process.WaitForExit(15000)) {
             $process.Kill()
-            throw "Runtime self-test timed out; the executable may be showing a startup error dialog"
+            throw "Qt runtime self-test timed out; the executable may be showing a startup error dialog"
           }
           if ($process.ExitCode -ne 0) {
             throw "Runtime self-test failed with exit code $($process.ExitCode)"
