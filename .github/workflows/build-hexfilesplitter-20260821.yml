@@ -42,6 +42,30 @@ jobs:
         shell: pwsh
         run: python -m PyInstaller --noconfirm --clean hex_file_splitter_gui.spec
 
+      - name: Inspect bundled Tcl/Tk runtime
+        shell: pwsh
+        run: |
+          $archive = pyi-archive_viewer -l "dist\HexFileSplitter.exe" | Out-String
+          if ($archive -notmatch '_tcl_data[\\/]+init\.tcl') {
+            throw "init.tcl is missing from the executable"
+          }
+          if ($archive -notmatch '_tk_data[\\/]+tk\.tcl') {
+            throw "tk.tcl is missing from the executable"
+          }
+
+      - name: Run Tcl/Tk and drag-and-drop self-test
+        shell: pwsh
+        run: |
+          $exe = (Resolve-Path "dist\HexFileSplitter.exe").Path
+          $process = Start-Process -FilePath $exe -ArgumentList "--self-test" -PassThru
+          if (-not $process.WaitForExit(15000)) {
+            $process.Kill()
+            throw "Runtime self-test timed out; the executable may be showing a startup error dialog"
+          }
+          if ($process.ExitCode -ne 0) {
+            throw "Runtime self-test failed with exit code $($process.ExitCode)"
+          }
+
       - name: Verify executable and create checksum
         shell: pwsh
         run: |
