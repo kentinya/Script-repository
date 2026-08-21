@@ -14,7 +14,7 @@ HEX 文件拆分工具：Windows 10 EXE 构建说明
 
 1. 解压整个构建包，不要只单独解压批处理文件。
 2. 双击 build_windows.bat。
-3. 首次构建会自动下载 PyInstaller 和 tkinterdnd2，请保持联网。
+3. 首次构建会自动下载 PyInstaller 和 PySide6 Qt 运行库，请保持联网。
 4. 构建成功后，程序位于：
 
    dist\HexFileSplitter.exe
