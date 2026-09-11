@@ -45,7 +45,8 @@ jobs:
 
       - name: Repair known GUI transfer corruption
         shell: powershell
-        run: python -c "from pathlib import Path; p=Path('code_compare_gui.py'); s=p.read_bytes().decode('utf-8',errors='replace'); s=s.replace(chr(0xfffd)+'}'+chr(0x65e7)+chr(0x7248)+chr(0x672c), chr(0x4ec5)+chr(0x65e7)+chr(0x7248)+chr(0x672c)); p.write_text(s,encoding='utf-8',newline=''); print('remaining replacement chars:',s.count(chr(0xfffd)))"
+        run: |
+          python -c "from pathlib import Path; p=Path('code_compare_gui.py'); s=p.read_bytes().decode('utf-8',errors='replace'); s=s.replace(chr(0xfffd)+'}'+chr(0x65e7)+chr(0x7248)+chr(0x672c), chr(0x4ec5)+chr(0x65e7)+chr(0x7248)+chr(0x672c)); p.write_text(s,encoding='utf-8',newline=''); print(s.count(chr(0xfffd)))"
 
       - name: Verify Python syntax
         run: python -m py_compile code_compare_core.py code_compare_gui.py report_export.py
