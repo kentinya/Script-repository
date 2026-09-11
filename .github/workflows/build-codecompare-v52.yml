@@ -54,7 +54,7 @@ jobs:
       - name: Apply v5.4 progress and performance patch
         shell: powershell
         run: |
-          python -c "from pathlib import Path; import base64,gzip; files=sorted(Path('codecompare-build').glob('v54script_*.b64')); data=''.join(p.read_text(encoding='ascii').strip() for p in files); raw=gzip.decompress(base64.b64decode(data)); Path('patch_v54.py').write_bytes(raw); print('script bytes',len(raw))"
+          python -c "from pathlib import Path; import base64,gzip; files=sorted(Path('codecompare-build').glob('v54s2_*.b64')); data=''.join(p.read_text(encoding='ascii').strip() for p in files); raw=gzip.decompress(base64.b64decode(data)); Path('patch_v54.py').write_bytes(raw); print('script bytes',len(raw))"
           python patch_v54.py
 
       - name: Verify Python syntax
