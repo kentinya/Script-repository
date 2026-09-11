@@ -67,7 +67,7 @@ jobs:
           New-Item -ItemType Directory -Force test_right | Out-Null
           Set-Content -Encoding ascii test_left\B\B.c "int x = 1;"
           Set-Content -Encoding ascii test_right\B.c "int x = 2;"
-          python -c "from pathlib import Path; from code_compare_core import compare_directories; e=[]; r=compare_directories(Path('test_left'),Path('test_right'),progress_callback=lambda *x:e.append(x)); assert len(r)==1 and r[0].left_path and r[0].right_path and r[0].status=='MODIFIED'; assert any(x[0]=='compare' for x in e) and e[-1][0]=='done'; print(r[0].relative_path, e[-1])"
+          python -c "from pathlib import Path; from code_compare_core import compare_directories; e=[]; r=compare_directories(Path('test_left'),Path('test_right'),progress_callback=lambda *x:e.append(x)); assert len(r)==1 and r[0].left_path and r[0].right_path and r[0].status=='MODIFIED'; assert any(x[0]=='compare' for x in e) and e[-1][0]=='done'; print('nested-match-ok', r[0].status, len(e))"
 
       - name: Install build dependencies
         run: python -m pip install --upgrade pip pyinstaller openpyxl
