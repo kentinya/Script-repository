@@ -21,12 +21,19 @@ jobs:
       - name: Restore source files
         shell: powershell
         run: |
-          $core = (Get-ChildItem "codecompare-build/core_*.b64" | Sort-Object Name | ForEach-Object { Get-Content -Raw $_.FullName }) -join ""
-          $gui = (Get-ChildItem "codecompare-build/gui_*.b64" | Sort-Object Name | ForEach-Object { Get-Content -Raw $_.FullName }) -join ""
-          $report = (Get-ChildItem "codecompare-build/report_*.b64" | Sort-Object Name | ForEach-Object { Get-Content -Raw $_.FullName }) -join ""
-          [IO.File]::WriteAllBytes("code_compare_core.py", [Convert]::FromBase64String($core))
-          [IO.File]::WriteAllBytes("code_compare_gui.py", [Convert]::FromBase64String($gui))
-          [IO.File]::WriteAllBytes("report_export.py", [Convert]::FromBase64String($report))
+          function Restore-Chunks($pattern, $output) {
+            $stream = New-Object System.IO.MemoryStream
+            Get-ChildItem $pattern | Sort-Object Name | ForEach-Object {
+              $encoded = (Get-Content -Raw $_.FullName).Trim()
+              $bytes = [Convert]::FromBase64String($encoded)
+              $stream.Write($bytes, 0, $bytes.Length)
+            }
+            [IO.File]::WriteAllBytes($output, $stream.ToArray())
+            $stream.Dispose()
+          }
+          Restore-Chunks "codecompare-build/core_*.b64" "code_compare_core.py"
+          Restore-Chunks "codecompare-build/gui_*.b64" "code_compare_gui.py"
+          Restore-Chunks "codecompare-build/report_*.b64" "report_export.py"
 
       - name: Verify restored source
         run: python -m py_compile code_compare_core.py code_compare_gui.py report_export.py
