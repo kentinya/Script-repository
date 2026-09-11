@@ -1,4 +1,4 @@
-name: Build CodeCompareTool v5.2 EXE
+name: Build CodeCompareTool v5.3 EXE
 
 on:
   push:
@@ -46,10 +46,22 @@ jobs:
       - name: Repair known GUI transfer corruption
         shell: powershell
         run: |
-          python -c "from pathlib import Path; p=Path('code_compare_gui.py'); s=p.read_bytes().decode('utf-8',errors='replace'); s=s.replace(chr(0xfffd)+'}'+chr(0x65e7)+chr(0x7248)+chr(0x672c), chr(0x4ec5)+chr(0x65e7)+chr(0x7248)+chr(0x672c)); p.write_text(s,encoding='utf-8',newline=''); print(s.count(chr(0xfffd)))"
+          python -c "from pathlib import Path; p=Path('code_compare_gui.py'); s=p.read_bytes().decode('utf-8',errors='replace'); s=s.replace(chr(0xfffd)+'}'+chr(0x65e7)+chr(0x7248)+chr(0x672c), chr(0x4ec5)+chr(0x65e7)+chr(0x7248)+chr(0x672c)); p.write_text(s,encoding='utf-8',newline='')"
+
+      - name: Apply v5.3 flexible file matching
+        run: python codecompare-build/patch_v53.py
 
       - name: Verify Python syntax
         run: python -m py_compile code_compare_core.py code_compare_gui.py report_export.py
+
+      - name: Smoke test nested filename matching
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force test_left\B | Out-Null
+          New-Item -ItemType Directory -Force test_right | Out-Null
+          Set-Content -Encoding ascii test_left\B\B.c "int x = 1;"
+          Set-Content -Encoding ascii test_right\B.c "int x = 2;"
+          python -c "from pathlib import Path; from code_compare_core import compare_directories; r=compare_directories(Path('test_left'),Path('test_right')); assert len(r)==1 and r[0].left_path and r[0].right_path and r[0].status=='MODIFIED'; print(r[0].relative_path)"
 
       - name: Install build dependencies
         run: python -m pip install --upgrade pip pyinstaller openpyxl
@@ -68,7 +80,7 @@ jobs:
       - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
-          name: CodeCompareTool_v5.2_Windows_x64
+          name: CodeCompareTool_v5.3_Windows_x64
           path: dist/CodeCompareTool.exe
           if-no-files-found: error
           retention-days: 7
