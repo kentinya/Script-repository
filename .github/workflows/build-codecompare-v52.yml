@@ -45,12 +45,18 @@ jobs:
           Restore-Chunks "codecompare-build/gui_*.b64" "code_compare_gui.py"
           Restore-Chunks "codecompare-build/report_*.b64" "report_export.py"
 
-      - name: Show source hashes
+      - name: Repair known GUI transfer corruption
         shell: powershell
         run: |
-          Get-FileHash code_compare_core.py -Algorithm SHA256
-          Get-FileHash code_compare_gui.py -Algorithm SHA256
-          Get-FileHash report_export.py -Algorithm SHA256
+          @'
+from pathlib import Path
+p = Path("code_compare_gui.py")
+s = p.read_bytes().decode("utf-8", errors="replace")
+s = s.replace("\ufffd}\u65e7\u7248\u672c", "\u4ec5\u65e7\u7248\u672c")
+p.write_text(s, encoding="utf-8", newline="")
+print("remaining replacement chars:", s.count("\ufffd"))
+'@ | Set-Content -Encoding UTF8 repair_gui.py
+          python repair_gui.py
 
       - name: Verify Python syntax
         run: python -m py_compile code_compare_core.py code_compare_gui.py report_export.py
