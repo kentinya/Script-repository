@@ -27,10 +27,8 @@ jobs:
           [IO.File]::WriteAllText("codecompare-build/gui2fix_00.b64", $g00, [Text.Encoding]::ASCII)
           [IO.File]::WriteAllText("codecompare-build/gui2fix_04.b64", $g04, [Text.Encoding]::ASCII)
           [IO.File]::WriteAllText("codecompare-build/gui2fix_05.b64", $g05, [Text.Encoding]::ASCII)
-
           $gui2 = (Get-ChildItem "codecompare-build/gui2fix_*.b64" | Sort-Object Name | ForEach-Object { (Get-Content -Raw $_.FullName).Trim() }) -join ""
           [IO.File]::WriteAllText("codecompare-build/gui_02.b64", $gui2, [Text.Encoding]::ASCII)
-
           function Restore-Chunks($pattern, $output) {
             $stream = New-Object System.IO.MemoryStream
             Get-ChildItem $pattern | Sort-Object Name | ForEach-Object {
@@ -47,16 +45,7 @@ jobs:
 
       - name: Repair known GUI transfer corruption
         shell: powershell
-        run: |
-          @'
-from pathlib import Path
-p = Path("code_compare_gui.py")
-s = p.read_bytes().decode("utf-8", errors="replace")
-s = s.replace("\ufffd}\u65e7\u7248\u672c", "\u4ec5\u65e7\u7248\u672c")
-p.write_text(s, encoding="utf-8", newline="")
-print("remaining replacement chars:", s.count("\ufffd"))
-'@ | Set-Content -Encoding UTF8 repair_gui.py
-          python repair_gui.py
+        run: python -c "from pathlib import Path; p=Path('code_compare_gui.py'); s=p.read_bytes().decode('utf-8',errors='replace'); s=s.replace(chr(0xfffd)+'}'+chr(0x65e7)+chr(0x7248)+chr(0x672c), chr(0x4ec5)+chr(0x65e7)+chr(0x7248)+chr(0x672c)); p.write_text(s,encoding='utf-8',newline=''); print('remaining replacement chars:',s.count(chr(0xfffd)))"
 
       - name: Verify Python syntax
         run: python -m py_compile code_compare_core.py code_compare_gui.py report_export.py
