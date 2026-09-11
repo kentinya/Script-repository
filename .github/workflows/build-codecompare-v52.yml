@@ -21,6 +21,9 @@ jobs:
       - name: Restore source files
         shell: powershell
         run: |
+          $gui2 = (Get-ChildItem "codecompare-build/gui2fix_*.b64" | Sort-Object Name | ForEach-Object { (Get-Content -Raw $_.FullName).Trim() }) -join ""
+          [IO.File]::WriteAllText("codecompare-build/gui_02.b64", $gui2, [Text.Encoding]::ASCII)
+
           function Restore-Chunks($pattern, $output) {
             $stream = New-Object System.IO.MemoryStream
             Get-ChildItem $pattern | Sort-Object Name | ForEach-Object {
@@ -35,7 +38,26 @@ jobs:
           Restore-Chunks "codecompare-build/gui_*.b64" "code_compare_gui.py"
           Restore-Chunks "codecompare-build/report_*.b64" "report_export.py"
 
-      - name: Verify restored source
+      - name: Verify exact source hashes
+        shell: powershell
+        run: |
+          $expected = @{
+            "code_compare_core.py" = "3179912b652530a1f38bd513ba5c64b0158d1ec4fdbdb44bcabcf41e37572690"
+            "code_compare_gui.py" = "06269cc6dd0060ddc9c14b3fb7134c88ae66fb92a3c0a08265100247be28388e"
+            "report_export.py" = "6cc12ce1761d916aedc89d978c872db493dc4a063e176a0d393ec279641216fb"
+          }
+          $bad = $false
+          foreach ($f in $expected.Keys) {
+            $actual = (Get-FileHash $f -Algorithm SHA256).Hash.ToLower()
+            Write-Host "$f : $actual"
+            if ($actual -ne $expected[$f]) {
+              Write-Host "HASH MISMATCH: expected $($expected[$f])"
+              $bad = $true
+            }
+          }
+          if ($bad) { throw "Restored source differs from validated local v5.2 source" }
+
+      - name: Verify Python syntax
         run: python -m py_compile code_compare_core.py code_compare_gui.py report_export.py
 
       - name: Install build dependencies
