@@ -1,26 +1,19 @@
 ## Xray 多节点管理器（v1.5）
 
-支持 VLESS + REALITY、Shadowsocks 2022、A IP:端口 → B IP:端口 转发，以及**每个节点独立的累计流量配额**。
+支持 VLESS + REALITY、Shadowsocks 2022、TCP / UDP 端口转发，以及各节点独立的累计流量配额。
 
-安装或更新脚本：
+**📘 [Xray 脚本完整使用说明（安装、菜单、节点、转发、流量限制、故障排查）](docs/xray-manager.md)**
 
-```bash
+快速开始：
+
+~~~bash
 curl -fsSLo xray-manager.sh https://raw.githubusercontent.com/kentinya/Script-repository/main/xray-manager.sh
 sudo bash xray-manager.sh
-```
+~~~
 
-在菜单中选择 **14 查看流量统计**、**15 设置单节点流量额度**、**16 流量清零/恢复节点**。也支持命令行：
+首次启动选择 `01` 安装 Xray；以后运行同一脚本即可进入交互菜单。想直接查看命令行用法，可执行 `bash xray-manager.sh help`。
 
-```bash
-sudo bash xray-manager.sh quota-set my-node 10     # 总上传+下载限额 10 GiB
-sudo bash xray-manager.sh quota-list           # 查看全部节点用量
-sudo bash xray-manager.sh quota-reset my-node  # 用量归零并恢复节点
-sudo bash xray-manager.sh quota-set my-node 0  # 取消限额
-```
-
-首次设置后脚本会创建 `xray-multi-traffic.timer`，每分钟通过 Xray StatsService 采样。达到限额后自动从服务配置移除对应节点的入站；配额与累计流量持久化保存，重启后不自动清零。REALITY、Shadowsocks 和本脚本建立的端口转发规则都支持独立额度。
-
-**注意：** 这是分钟级的流量配额管理，不是硬实时限速；高吞吐量可能在下一次检测前超过额度，非正常的 Xray 重启可能遗漏最后一段未采样流量。节点禁用/恢复需要重启 Xray，其他节点现有连接可能暂时中断。统计为 Xray 内部流量，不等同于云厂商账单计费流量。若用于防止恶意刷流量，请同时配置云平台流量告警和防火墙。
+> 提示：流量配额为分钟级累计上/下行限额，不是硬实时限速；请同时做好防火墙和云平台流量告警。当前 REALITY TLS 目标检测还存在版本判断问题，详见[使用说明中的注意事项](docs/xray-manager.md#5-新建-vless--reality-节点)。
 
 ## Realm转发脚本使用
 ### 功能
