@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Xray 多节点管理器 v1.3：VLESS + Vision + REALITY / Shadowsocks 2022
+# Xray 多节点管理器 v1.4：VLESS + Vision + REALITY / Shadowsocks 2022
 # 支持 Linux + systemd，建议 Debian 12 / Ubuntu 22.04+ / Rocky Linux 9。
 # 使用：sudo bash xray-manager.sh    或 sudo bash xray-manager.sh help
 set -Eeuo pipefail
@@ -81,7 +81,7 @@ ui_home() {
 import json,sys
 try:
     with open(sys.argv[1],encoding='utf8') as f:
-        print(len(json.load(f).get('nodes', [])))
+        print(sum(n.get('kind') != 'forward' for n in json.load(f).get('nodes', [])))
 except (OSError,ValueError,TypeError):
     print('?')
 PY_NODE_COUNT
@@ -97,7 +97,7 @@ PY_NODE_COUNT
   printf '%s' "$UI_ACCENT"
   cat <<'EOF_UI_BANNER'
   ╭──────────────────────────────────────────────────────────────╮
-  │  ◆  X R A Y   M U L T I                            v1.3     │
+  │  ◆  X R A Y   M U L T I                            v1.4     │
   │     多协议 · 多节点 · 一站式安全管理                          │
   ╰──────────────────────────────────────────────────────────────╯
 EOF_UI_BANNER
@@ -119,6 +119,10 @@ EOF_UI_BANNER
   printf '  %s[08]%s  查看服务状态              %s[09]%s  重启 Xray 服务\n' \
     "$UI_ACCENT" "$UI_RESET" "$UI_ACCENT" "$UI_RESET"
   ui_item '10' 'REALITY 回落限速加固'
+  ui_section '端口转发'
+  printf '  %s[11]%s  新增 TCP / UDP 转发        %s[12]%s  查看转发规则\n' \
+    "$UI_ACCENT" "$UI_RESET" "$UI_ACCENT" "$UI_RESET"
+  ui_item '13' '删除转发规则'
   ui_section '退出与卸载'
   printf '  %s[00]%s  卸载与删除全部节点 %s(危险)%s    %s[Q]%s   退出\n' \
     "$UI_BAD" "$UI_RESET" "$UI_BAD" "$UI_RESET" "$UI_ACCENT" "$UI_RESET"
@@ -373,6 +377,12 @@ if action=='add':
         node.update(uuid=uuid,private_key=priv,public_key=pub,short_id=sid,sni=sni,dest=dest)
     elif kind=='ss2022':
         node.update(method=method,password=psk)
+    elif kind=='forward':
+        if method not in ('tcp','udp','tcp,udp'):
+            raise ValueError('无效转发协议')
+        if not psk.isdigit() or not 1 <= int(psk) <= 65535:
+            raise ValueError('无效目标端口')
+        node.update(target_host=dest,target_port=int(psk),network=method)
     else: raise ValueError('不支持的协议类型')
     nodes.append(node)
 elif action=='delete':
@@ -409,15 +419,33 @@ for n in nodes:
             }},
             'sniffing':{'enabled':True,'destOverride':['http','tls','quic'],'routeOnly':True}
         })
-    else:
+    elif n['kind']=='ss2022':
         inbounds.append({
             'tag':'ss2022-'+n['name'], 'listen':'0.0.0.0', 'port':n['port'],
             'protocol':'shadowsocks', 'settings':{
                 'method':n['method'],'password':n['password'],'network':'tcp,udp'
             }
         })
+    elif n['kind']=='forward':
+        inbounds.append({
+            'tag':'forward-'+n['name'], 'listen':n['host'], 'port':n['port'],
+            'protocol':'tunnel',
+            'settings':{
+                'allowedNetwork':n['network'],
+                'rewriteAddress':n['target_host'],
+                'rewritePort':n['target_port'],
+                'followRedirect':False
+            },
+            'sniffing':{'enabled':False}
+        })
+    else:
+        raise ValueError('未知节点类型: '+str(n['kind']))
 conf={'log':{'loglevel':'warning'},'inbounds':inbounds,
       'outbounds':[{'protocol':'freedom','tag':'direct'}, {'protocol':'blackhole','tag':'block'}]}
+forward_tags=['forward-'+n['name'] for n in nodes if n['kind']=='forward']
+if forward_tags:
+    conf['routing']={'rules':[{'type':'field','inboundTag':[tag],
+                               'outboundTag':'direct'} for tag in forward_tags]}
 for path,data in [(new_db,db),(new_conf,conf)]:
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
     with os.fdopen(fd,'w',encoding='utf-8') as f:
@@ -576,7 +604,7 @@ def tls_probe(host,port,server_name):
                 sock.settimeout(3)
                 sock.connect(addr)
                 with ctx.wrap_socket(sock,server_hostname=server_name) as tls:
-                    if tls.version()=='TLSv1.3' and tls.selected_alpn_protocol()=='h2':
+                    if tls.version()=='TLSv1.4' and tls.selected_alpn_protocol()=='h2':
                         return ip
                     last='TLS 1.3 或 h2 不符合要求'
         except (OSError,ssl.SSLError) as e:
@@ -779,12 +807,109 @@ add_ss() {
   warn '请同时在云厂商安全组 / 系统防火墙放行该 TCP 和 UDP 端口。'
 }
 
+
+# 转发入口由 Xray tunnel 实现，独立规则复用现有数据库及配置回滚。
+forward_exists() {
+  [[ -f "$DB" ]] || return 1
+  python3 - "$DB" "$1" <<'PY_FORWARD_EXISTS'
+import json,sys
+with open(sys.argv[1],encoding='utf-8') as f:
+    nodes=json.load(f).get('nodes',[])
+sys.exit(0 if any(n.get('name')==sys.argv[2] and n.get('kind')=='forward' for n in nodes) else 1)
+PY_FORWARD_EXISTS
+}
+
+forward_list() {
+  say '当前端口转发规则'
+  [[ -f "$DB" ]] || { info '暂无转发规则。'; return 0; }
+  python3 - "$DB" <<'PY_FORWARD_LIST'
+import json,sys,ipaddress
+with open(sys.argv[1],encoding='utf-8') as f:
+    rules=[n for n in json.load(f).get('nodes',[]) if n.get('kind')=='forward']
+if not rules:
+    print('  暂无转发规则。')
+else:
+    print('  %-20s %-23s %-31s %s' % ('名称','A 监听','B 目标','协议'))
+    for n in rules:
+        dest=n['target_host']
+        try:
+            if ipaddress.ip_address(dest).version==6: dest='['+dest+']'
+        except ValueError:
+            pass
+        print('  %-20s %-23s %-31s %s' % (
+            n['name'],f"{n['host']}:{n['port']}",
+            f"{dest}:{n['target_port']}",n['network']))
+PY_FORWARD_LIST
+}
+
+add_forward() {
+  require_installed
+  say '新增 A → B 端口转发'
+  local name listen port target target_port choice network
+  ask name '规则名称（字母、数字、下划线、短横线）' ''
+  valid_name "$name" || die '规则名称不合法。'
+  ask listen 'A 服务器监听 IPv4（0.0.0.0 表示所有网卡）' '0.0.0.0'
+  python3 - "$listen" <<'PY_FORWARD_LISTEN' || die '监听 IP 必须是有效 IPv4 地址。'
+import ipaddress,sys
+ipaddress.IPv4Address(sys.argv[1])
+PY_FORWARD_LISTEN
+  ask port 'A 服务器监听端口' '10086'
+  valid_port "$port" || die '监听端口必须是 1-65535。'
+  port="$((10#$port))"
+  port_available "$port" "$name"
+  ask target 'B 服务器目标 IP 或域名' ''
+  valid_host "$target" || die '目标 IP 或域名不合法。'
+  case "$target" in
+    0.0.0.0|::|255.255.255.255) die '不允许使用无效目标地址。' ;;
+  esac
+  ask target_port 'B 服务器目标端口' "$port"
+  valid_port "$target_port" || die '目标端口必须是 1-65535。'
+  target_port="$((10#$target_port))"
+  if [[ "$target_port" == "$port" ]]; then
+    case "$target" in
+      "$listen") die 'A/B 地址与端口完全相同，会造成转发循环。' ;;
+      127.0.0.1|localhost)
+        [[ "$listen" != '0.0.0.0' && "$listen" != '127.0.0.1' ]] \
+          || die '同端口转发到本机回环地址可能产生转发循环。' ;;
+    esac
+  fi
+  printf '  [1] TCP（默认）  [2] UDP  [3] TCP + UDP\n'
+  ask choice '选择转发协议' '1'
+  case "$choice" in
+    1|tcp|TCP) network='tcp' ;;
+    2|udp|UDP) network='udp' ;;
+    3|both|BOTH|tcp,udp) network='tcp,udp' ;;
+    *) die '无效转发协议。' ;;
+  esac
+  if [[ "$listen" == 0.0.0.0 ]]; then
+    warn '转发入口将对所有 IPv4 网卡开放。请在云防火墙限制来源 IP，防止被滥用刷流量。'
+  fi
+  make_candidate add "$name" forward "$port" "$listen" '' '' '' '' '' "$target" "$network" "$target_port"
+  apply_candidate || die '转发创建失败，旧配置已恢复。'
+  info "转发已启用：$listen:$port → $target:$target_port [$network]"
+  warn '请确保 A 的防火墙 / 云安全组放行监听端口，B 允许来自 A 的连接。'
+}
+
+delete_forward() {
+  require_installed
+  forward_list
+  local name confirm
+  ask name '要删除的转发规则名称' ''
+  valid_name "$name" || die '规则名称不合法。'
+  forward_exists "$name" || die '找不到该转发规则；代理节点请使用节点删除菜单。'
+  ask confirm "确定删除转发规则 [$name] 吗？请输入 YES" ''
+  [[ "$confirm" == YES ]] || { info '已取消。'; return; }
+  make_candidate delete "$name"
+  apply_candidate || die '删除转发失败，旧配置已恢复。'
+  info "转发规则 $name 已删除。"
+}
+
 node_names() {
   [[ -f "$DB" ]] || { warn '暂无节点。'; return 0; }
   python3 - "$DB" <<'PY'
 import json,sys
-with open(sys.argv[1]) as f: a=json.load(f)['nodes']
-if not a: print('暂无节点。')
+with open(sys.argv[1]) as f: a=[n for n in json.load(f)['nodes'] if n.get('kind')!='forward']
+if not a: print('暂无代理节点。')
 else:
     print(f"{'名称':<20} {'协议':<12} {'端口':<7} {'连接地址'}")
     for n in a:
@@ -805,6 +930,7 @@ import json,sys,base64,urllib.parse,ipaddress
 with open(sys.argv[1]) as f: nodes=json.load(f)['nodes']
 n=next((n for n in nodes if n['name']==sys.argv[2]),None)
 if n is None: sys.exit('找不到节点')
+if n.get('kind')=='forward': sys.exit('该名称属于转发规则，请使用 forward-list 查看')
 host=n['host']
 try:
     if ipaddress.ip_address(host).version==6: host='['+host+']'
@@ -844,6 +970,7 @@ delete_node() {
   local name confirm
   ask name '要删除的节点名称' ''
   valid_name "$name" || die '节点名称不合法。'
+  if forward_exists "$name"; then die '该名称属于转发规则，请从端口转发菜单删除。'; fi
   ask confirm "确定删除 [$name] 吗？请输入 YES" ''
   [[ "$confirm" == YES ]] || { info '已取消。'; return; }
   make_candidate delete "$name"
@@ -870,12 +997,13 @@ status() {
     warn '服务尚未安装。'
   fi
   node_names
+  forward_list
 }
 
 uninstall_all() {
   local confirm
   say '卸载 Xray Multi'
-  warn '此操作将删除本脚本管理的所有节点、链接和二维码（不可恢复）。'
+  warn '此操作将删除本脚本管理的所有节点、端口转发规则、链接和二维码（不可恢复）。'
   ask confirm '确认卸载请输入 REMOVE' ''
   [[ "$confirm" == REMOVE ]] || { info '已取消。'; return; }
   systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
@@ -899,7 +1027,7 @@ uninstall_all() {
 
 help_text() {
   cat <<'EOF'
-Xray 多配置管理器 v1.3（需要 root，Linux + systemd）
+Xray 多配置管理器 v1.4（需要 root，Linux + systemd）
 
 用法：sudo bash xray-manager.sh [命令] [节点名]
   不传参数        彩色中文交互菜单（文本输入支持左右方向键）
@@ -913,6 +1041,9 @@ Xray 多配置管理器 v1.3（需要 root，Linux + systemd）
   status          查看服务状态 / 所有节点
   restart         重启服务
   harden          给已有 REALITY 节点加回落限速（不更换 SNI）
+  forward-add     新增 A IP:端口 → B IP:端口 转发（TCP / UDP）
+  forward-list    查看全部转发规则
+  forward-delete  删除指定转发规则
   uninstall       卸载本工具管理的配置和 Xray
   help            显示帮助
 
@@ -934,6 +1065,9 @@ Xray 多配置管理器 v1.3（需要 root，Linux + systemd）
      请留意同一目标可被大量并发回落连接滥用，仍需主机流量监控。
   4. 仅管理本工具创建的节点，不迁移系统已有 /usr/local/etc/xray 配置。
   5. 使用独立 systemd 服务 xray-multi，不接管已有 xray.service。
+  6. 端口转发规则和节点统一保存 /var/lib/xray-multi/nodes.json，支持失败回滚。
+     转发不是加密隧道；公网监听应在防火墙限制来源 IP，防止刷流量。
+     B 服务器通常看到 A 的出口 IP，而不是原始客户端 IP。
 EOF
 }
 
@@ -941,7 +1075,7 @@ menu() {
   local choice
   while :; do
     ui_home
-    ui_read choice "  › 请选择操作 [01-10 / 00 / Q]: " || break
+    ui_read choice "  › 请选择操作 [01-13 / 00 / Q]: " || break
     case "$choice" in
       1|01|2|02) install_xray ;;
       3|03) add_reality ;;
@@ -952,6 +1086,9 @@ menu() {
       8|08) status ;;
       9|09) require_installed; systemctl restart "$SERVICE" && info '服务已重启。' ;;
       10) harden_reality ;;
+      11) add_forward ;;
+      12) forward_list ;;
+      13) delete_forward ;;
       0|00) uninstall_all ;;
       q|Q|quit|exit) break ;;
       *) warn '无效选项：请输入菜单中的编号。' ;;
@@ -977,6 +1114,9 @@ main() {
     status) status ;;
     restart) require_installed; systemctl restart "$SERVICE"; info '服务已重启。' ;;
     harden) harden_reality ;;
+    forward-add) add_forward ;;
+    forward-list) forward_list ;;
+    forward-delete) delete_forward ;;
     uninstall) uninstall_all ;;
     *) die '未知命令，请执行 bash xray-manager.sh help 查看帮助。' ;;
   esac
