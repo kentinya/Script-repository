@@ -36,3 +36,5 @@ jobs:
         run: bash xray/tests/check-reality-selection.sh
       - name: Test generated quota configuration
         run: bash xray/tests/check-node-quota.sh
+      - name: Test GOST forwarding configuration
+        run: bash xray/tests/check-gost-forward.sh
