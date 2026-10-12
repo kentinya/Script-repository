@@ -69,6 +69,7 @@ bash xray-manager.sh help
 | `15` | 设置单节点流量配额 |
 | `16` | 清零流量，恢复因超额停用的节点 |
 | `00` | 卸载本工具及所有托管数据（危险） |
+| `17` | 检测现有 REALITY 节点 SNI / 目标可用性（只读） |
 | `Q` | 退出 |
 
 菜单选择后回车。可输入 `3` 或 `03`；普通文字输入支持 `←`、`→`、Home、End、Backspace、Delete。带 `[默认值]` 的提示可直接回车使用默认值。
@@ -111,6 +112,18 @@ XRAY_GEO_COUNTRY=DE sudo -E bash xray-manager.sh add-reality
 > **REALITY 目标检测说明**：先通过 TLS 1.3/h2 检测，再通过真实 Xray REALITY 握手及本机数据往返检测。如果仍失败，检查服务器 DNS、出站 443、目标证书兼容性，以及 Cloudflare IP/ASN 排除。
 
 **防滥用建议**：不要把 Cloudflare 排除当成“不会被刷流量”的保证。限制公网暴露、监测出站流量，并在云平台配置告警或硬性流量控制。`10` 或 `harden` 只针对未认证回落连接设置限速，不限制正常节点带宽，也不能防止所有滥用。
+
+### 检查已经创建的 REALITY 节点
+
+如果旧节点偶尔连接失败，可以使用菜单 `17`，也可以运行：
+
+~~~bash
+sudo bash xray-manager.sh reality-check reality-hk
+~~~
+
+该命令读取节点当前的 SNI 与 REALITY 目标，先执行 TLS + Cloudflare 检测，再做两次本机 REALITY 数据往返测试。**不会修改或重启原有服务**。如果旧节点实测失败，可新建节点，确认连接后更新客户端分享链接，再删除旧节点。新建节点会生成新 UUID、密钥和 Short ID，旧连接不会自动迁移。
+
+检查通过也不能保证旧客户端可用；请同时核实公网端口、安全组、防火墙、客户端版本及两端系统时间。
 
 ## 6. 新建 Shadowsocks 2022 节点
 
@@ -179,6 +192,7 @@ sudo bash xray-manager.sh quota-reset reality-hk
 ~~~bash
 sudo bash xray-manager.sh install         # 安装 / 更新 Xray
 sudo bash xray-manager.sh add-reality     # 新建 REALITY
+sudo bash xray-manager.sh reality-check reality-hk  # 检查旧节点 SNI
 sudo bash xray-manager.sh add-ss          # 新建 Shadowsocks 2022
 sudo bash xray-manager.sh list            # 列出代理节点
 sudo bash xray-manager.sh show reality-hk # 节点分享链接、二维码
