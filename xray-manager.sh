@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Xray 多节点管理器 v1.4：VLESS + Vision + REALITY / Shadowsocks 2022
+# Xray 多节点管理器 v1.5：VLESS + Vision + REALITY / Shadowsocks 2022
 # 支持 Linux + systemd，建议 Debian 12 / Ubuntu 22.04+ / Rocky Linux 9。
 # 使用：sudo bash xray-manager.sh    或 sudo bash xray-manager.sh help
 set -Eeuo pipefail
@@ -16,6 +16,12 @@ UNIT='/etc/systemd/system/xray-multi.service'
 SERVICE='xray-multi.service'
 RUN_USER='xraymulti'
 MARKER="$DATA_DIR/installed-by-xray-multi"
+TRAFFIC_STATE="$DATA_DIR/traffic.json"
+STATS_PORT=18785
+MANAGER_BIN='/usr/local/sbin/xray-multi-manager'
+CONFIG_LOCK_FD=''
+TRAFFIC_UNIT='/etc/systemd/system/xray-multi-traffic.service'
+TRAFFIC_TIMER='/etc/systemd/system/xray-multi-traffic.timer'
 
 # 终端视觉风格参考 Gum：强调色、分组、状态提示；不依赖额外 TUI 程序。
 # 非交互环境、TERM=dumb、NO_COLOR 自动禁用 ANSI 控制符。
@@ -97,7 +103,7 @@ PY_NODE_COUNT
   printf '%s' "$UI_ACCENT"
   cat <<'EOF_UI_BANNER'
   ╭──────────────────────────────────────────────────────────────╮
-  │  ◆  X R A Y   M U L T I                            v1.4     │
+  │  ◆  X R A Y   M U L T I                            v1.5     │
   │     多协议 · 多节点 · 一站式安全管理                          │
   ╰──────────────────────────────────────────────────────────────╯
 EOF_UI_BANNER
@@ -123,6 +129,10 @@ EOF_UI_BANNER
   printf '  %s[11]%s  新增 TCP / UDP 转发        %s[12]%s  查看转发规则\n' \
     "$UI_ACCENT" "$UI_RESET" "$UI_ACCENT" "$UI_RESET"
   ui_item '13' '删除转发规则'
+  ui_section '单节点流量'
+  printf '  %s[14]%s  查看流量统计              %s[15]%s  设置单节点流量额度\n' \
+    "$UI_ACCENT" "$UI_RESET" "$UI_ACCENT" "$UI_RESET"
+  ui_item '16' '节点流量清零 / 恢复超额节点'
   ui_section '退出与卸载'
   printf '  %s[00]%s  卸载与删除全部节点 %s(危险)%s    %s[Q]%s   退出\n' \
     "$UI_BAD" "$UI_RESET" "$UI_BAD" "$UI_RESET" "$UI_ACCENT" "$UI_RESET"
@@ -138,27 +148,27 @@ check_root() {
 
 install_packages() {
   local missing=() p
-  for p in curl unzip openssl python3 qrencode ss; do
+  for p in curl unzip openssl python3 qrencode ss flock; do
     command -v "$p" >/dev/null 2>&1 || missing+=("$p")
   done
   ((${#missing[@]} == 0)) && return 0
   info "安装所需依赖：${missing[*]}"
   if command -v apt-get >/dev/null 2>&1; then
-    local packages=(curl unzip openssl python3 qrencode iproute2)
+    local packages=(curl unzip openssl python3 qrencode iproute2 util-linux)
     DEBIAN_FRONTEND=noninteractive apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y curl unzip openssl python3 qrencode iproute
+    dnf install -y curl unzip openssl python3 qrencode iproute util-linux
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y curl unzip openssl python3 qrencode iproute
+    yum install -y curl unzip openssl python3 qrencode iproute util-linux
   elif command -v pacman >/dev/null 2>&1; then
-    pacman -Sy --noconfirm --needed curl unzip openssl python qrencode iproute2
+    pacman -Sy --noconfirm --needed curl unzip openssl python qrencode iproute2 util-linux
   elif command -v zypper >/dev/null 2>&1; then
-    zypper --non-interactive install curl unzip openssl python3 qrencode iproute2
+    zypper --non-interactive install curl unzip openssl python3 qrencode iproute2 util-linux
   else
     die '不支持当前发行版的软件包管理器，请手动安装 curl unzip openssl python3 qrencode iproute2。'
   fi
-  for p in curl unzip openssl python3 qrencode ss; do
+  for p in curl unzip openssl python3 qrencode ss flock; do
     command -v "$p" >/dev/null 2>&1 || die "依赖安装失败：$p"
   done
 }
@@ -258,6 +268,9 @@ PY
     old_bin="$temp/xray.old"
     cp -p "$BIN" "$old_bin"
   fi
+  if [[ -f "$CONFIG" ]] && grep -q '"xraymulti-stats"' "$CONFIG"; then
+    traffic_sample || warn '更新内核前流量采集失败，可能损失最后一个采样区间的统计。'
+  fi
   install -m 755 "$temp/xray" "$BIN"
   create_layout
   touch "$MARKER"
@@ -275,6 +288,7 @@ PY
     fi
     die '服务启动失败，请执行 journalctl -u xray-multi -n 50 查看原因。'
   fi
+  if [[ -f "$TRAFFIC_TIMER" ]]; then setup_traffic_monitor; fi
   info "Xray ${latest} 已安装/更新，服务 ${SERVICE} 运行中。"
   rm -rf -- "$temp"
   trap - EXIT
@@ -321,6 +335,7 @@ valid_sni() {
 }
 
 port_available() {
+  [[ "$1" != "$STATS_PORT" ]] || die "端口 $STATS_PORT 已保留给本机 Xray 统计 API。"
   local port="$1" name="$2"
   # 已由本工具管理的监听端口，双协议均不允许同端口复用。
   python3 - "$DB" "$port" "$name" <<'PY'
@@ -354,18 +369,27 @@ ask_base() {
   valid_host "$NODE_HOST" || die '无效 IP 或域名。'
 }
 
+# 配置变更从生成候选到服务切换使用同一把锁，防止菜单与定时器冲突。
+release_config_lock() {
+  if [[ -n "$CONFIG_LOCK_FD" ]]; then
+    exec {CONFIG_LOCK_FD}>&-
+    CONFIG_LOCK_FD=''
+  fi
+}
 # 生成变更候选数据及 Xray 整体配置，不直接覆盖线上文件。
 make_candidate() {
   local action="$1" name="$2" kind="${3:-}" port="${4:-}" host="${5:-}" \
         uuid="${6:-}" priv="${7:-}" pub="${8:-}" sid="${9:-}" \
         sni="${10:-}" dest="${11:-}" method="${12:-}" psk="${13:-}"
   local candidate_db="$DATA_DIR/.nodes.pending.json" candidate_config="$CONF_DIR/.config.pending.json"
+  exec {CONFIG_LOCK_FD}>"$DATA_DIR/.config-operation.lock"
+  flock -x "$CONFIG_LOCK_FD" || die '无法取得配置修改锁'
   rm -f "$candidate_db" "$candidate_config"
-  python3 - "$DB" "$candidate_db" "$candidate_config" \
+  python3 - "$DB" "$candidate_db" "$candidate_config" "$TRAFFIC_STATE" "$STATS_PORT" \
     "$action" "$name" "$kind" "$port" "$host" "$uuid" "$priv" "$pub" \
     "$sid" "$sni" "$dest" "$method" "$psk" <<'PY'
 import json,sys,os
-(db_path,new_db,new_conf,action,name,kind,port,host,uuid,priv,pub,sid,sni,dest,method,psk)=sys.argv[1:]
+(db_path,new_db,new_conf,traffic_path,stats_port,action,name,kind,port,host,uuid,priv,pub,sid,sni,dest,method,psk)=sys.argv[1:]
 with open(db_path,encoding='utf-8') as f:
     db=json.load(f)
 nodes=db['nodes']
@@ -389,11 +413,18 @@ elif action=='delete':
     if not any(n['name']==name for n in nodes): raise ValueError('找不到指定节点')
     db['nodes']=[n for n in nodes if n['name']!=name]
     nodes=db['nodes']
-elif action=='harden':
+elif action=='harden' or action=='sync':
     pass
+elif action=='quota':
+    selected=next((n for n in nodes if n['name']==name),None)
+    if selected is None: raise ValueError('找不到指定节点')
+    limit=int(port)
+    if limit<0: raise ValueError('流量上限不能为负数')
+    selected['quota_bytes']=limit
 else: raise ValueError('无效操作')
 import secrets
 for n in nodes:
+    n.setdefault('quota_id',secrets.token_hex(12))
     if n['kind']=='reality' and 'fallback_limit' not in n:
         # 对每个节点持久化不同的限速数值，避免统一参数形成固定特征。
         up=(24+secrets.randbelow(25))*1024
@@ -404,8 +435,20 @@ for n in nodes:
             'download':{'afterBytes':(32+secrets.randbelow(97))*1024,
                         'bytesPerSec':down,'burstBytesPerSec':down*2}
         }
-inbounds=[]
+# 流量状态文件独立于节点数据库，采样不引发每分钟重启。
+try:
+    with open(traffic_path,encoding='utf-8') as f: traffic=json.load(f).get('nodes',{})
+except (OSError,ValueError,TypeError):
+    traffic={}
+if any(n['port']==int(stats_port) for n in nodes):
+    raise ValueError('现有节点占用了内部统计端口 '+stats_port+'，请先调整该节点')
+inbounds=[{'tag':'xraymulti-stats-in','listen':'127.0.0.1',
+           'port':int(stats_port),'protocol':'dokodemo-door',
+           'settings':{'address':'127.0.0.1'}}]
 for n in nodes:
+    used=traffic.get(n['quota_id'],{}).get('uplink',0)+traffic.get(n['quota_id'],{}).get('downlink',0)
+    if n.get('quota_bytes',0)>0 and used>=n['quota_bytes']:
+        continue
     if n['kind']=='reality':
         inbounds.append({
             'tag':'reality-'+n['name'], 'listen':'0.0.0.0', 'port':n['port'],
@@ -441,11 +484,14 @@ for n in nodes:
     else:
         raise ValueError('未知节点类型: '+str(n['kind']))
 conf={'log':{'loglevel':'warning'},'inbounds':inbounds,
-      'outbounds':[{'protocol':'freedom','tag':'direct'}, {'protocol':'blackhole','tag':'block'}]}
+      'outbounds':[{'protocol':'freedom','tag':'direct'}, {'protocol':'blackhole','tag':'block'}],
+      'stats':{},
+      'policy':{'system':{'statsInboundUplink':True,'statsInboundDownlink':True}},
+      'api':{'tag':'xraymulti-stats','services':['StatsService']}}
 forward_tags=['forward-'+n['name'] for n in nodes if n['kind']=='forward']
-if forward_tags:
-    conf['routing']={'rules':[{'type':'field','inboundTag':[tag],
-                               'outboundTag':'direct'} for tag in forward_tags]}
+rules=[{'type':'field','inboundTag':['xraymulti-stats-in'],'outboundTag':'xraymulti-stats'}]
+rules.extend({'type':'field','inboundTag':[tag],'outboundTag':'direct'} for tag in forward_tags)
+conf['routing']={'rules':rules}
 for path,data in [(new_db,db),(new_conf,conf)]:
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
     with os.fdopen(fd,'w',encoding='utf-8') as f:
@@ -462,6 +508,10 @@ apply_candidate() {
     rm -f "$staged_db" "$staged_config"
     die 'Xray 配置校验失败：未修改原来的节点。'
   fi
+  # 服务重启会清空内核计数，先落盘已观察到的流量。
+  if [[ -f "$CONFIG" ]] && grep -q '"xraymulti-stats"' "$CONFIG"; then
+    traffic_sample || warn '切换配置前无法采集流量；本次重启前未采集的字节可能丢失。'
+  fi
   cp -p "$DB" "$old_db"
   cp -p "$CONFIG" "$old_config"
   chown root:"$RUN_USER" "$staged_config"
@@ -475,10 +525,204 @@ apply_candidate() {
     cp -p "$old_config" "$CONFIG"
     systemctl restart "$SERVICE" || warn '旧服务恢复也失败，请检查系统日志。'
     rm -f "$old_db" "$old_config"
+    release_config_lock
     return 1
   fi
   rm -f "$old_db" "$old_config"
+  release_config_lock
   return 0
+}
+
+
+# StatsService 采样与累计存档。两次采样间的进程重启可能遗漏部分流量。
+traffic_db() {
+  python3 - "$DB" "$TRAFFIC_STATE" "$BIN" "$STATS_PORT" "$SERVICE" "$1" "$2" <<'PY_TRAFFIC'
+import fcntl,json,os,subprocess,sys,tempfile,time
+db_path,path,xray,port,service,action,name=sys.argv[1:]
+with open(db_path,encoding='utf-8') as f: nodes=json.load(f).get('nodes',[])
+os.makedirs(os.path.dirname(path),exist_ok=True)
+def run(argv):
+    return subprocess.run(argv,check=True,capture_output=True,text=True,timeout=8).stdout.strip()
+def epoch_id():
+    pid=int(run(['systemctl','show','-p','MainPID','--value',service]))
+    if pid<=0: raise RuntimeError('Xray 未运行')
+    with open('/proc/%d/stat'%pid) as f: raw=f.read()
+    start=raw[raw.rfind(')')+2:].split()[19]
+    with open('/proc/sys/kernel/random/boot_id') as f: boot=f.read().strip()
+    return '%s:%d:%s'%(boot,pid,start)
+def save(data):
+    fd,tmp=tempfile.mkstemp(dir=os.path.dirname(path),prefix='.traffic-')
+    try:
+        with os.fdopen(fd,'w',encoding='utf-8') as f:
+            os.fchmod(f.fileno(),0o600)
+            json.dump(data,f,ensure_ascii=False,indent=2)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp,path)
+    finally:
+        if os.path.exists(tmp): os.unlink(tmp)
+with open(path+'.lock','a+') as lock:
+    os.chmod(path+'.lock',0o600)
+    fcntl.flock(lock,fcntl.LOCK_EX)
+    try:
+        with open(path,encoding='utf-8') as f: data=json.load(f)
+    except FileNotFoundError:
+        data={'nodes':{}}
+    records=data.setdefault('nodes',{})
+    if action=='sample':
+        epoch=epoch_id()
+        output=run([xray,'api','statsquery','--server=127.0.0.1:'+port,'--pattern=inbound>>>'])
+        if epoch!=epoch_id(): raise RuntimeError('采样时 Xray 已重启')
+        counters={s['name']:int(s['value']) for s in json.loads(output or '{}').get('stat',[]) if 'name' in s}
+        for n in nodes:
+            qid=n.get('quota_id')
+            if not qid: continue
+            tag={'reality':'reality-','ss2022':'ss2022-','forward':'forward-'}.get(n['kind'],'')+n['name']
+            rec=records.setdefault(qid,{'uplink':0,'downlink':0,'last_up':0,'last_down':0,'epoch':''})
+            for key,last in (('uplink','last_up'),('downlink','last_down')):
+                current=counters.get('inbound>>>%s>>>traffic>>>%s'%(tag,key),0)
+                previous=int(rec.get(last,0))
+                delta=max(0,current-previous) if rec.get('epoch')==epoch and current>=previous else current
+                rec[key]=int(rec.get(key,0))+delta
+                rec[last]=current
+            rec['epoch']=epoch
+            rec['sample_at']=int(time.time())
+        save(data)
+    elif action=='reset':
+        node=next((n for n in nodes if n['name']==name),None)
+        if node is None: sys.exit('找不到指定节点')
+        qid=node.get('quota_id')
+        if not qid: sys.exit('节点 ID 尚未初始化')
+        rec=records.setdefault(qid,{})
+        rec['uplink']=0
+        rec['downlink']=0
+        save(data)
+    elif action=='reached':
+        with open('/etc/xray-multi/config.json',encoding='utf-8') as f:
+            active={n.get('tag') for n in json.load(f).get('inbounds',[])}
+        for n in nodes:
+            limit=int(n.get('quota_bytes',0))
+            rec=records.get(n.get('quota_id'),{})
+            used=int(rec.get('uplink',0))+int(rec.get('downlink',0))
+            tag={'reality':'reality-','ss2022':'ss2022-','forward':'forward-'}.get(n['kind'],'')+n['name']
+            if limit>0 and used>=limit and tag in active:
+                print('  节点 %s 已超额：%d / %d 字节'%(n['name'],used,limit))
+                sys.exit(0)
+        sys.exit(1)
+    elif action=='list':
+        gib=1024**3
+        print('  %-19s %-10s %10s %10s %17s  %s'%('名称','类型','上传GiB','下载GiB','已用/限额 GiB','状态'))
+        for n in nodes:
+            rec=records.get(n.get('quota_id'),{})
+            up=int(rec.get('uplink',0)); down=int(rec.get('downlink',0))
+            limit=int(n.get('quota_bytes',0)); used=up+down
+            target='不限' if limit==0 else '%.2f'%(limit/gib)
+            state='已停用' if limit>0 and used>=limit else '正常'
+            print('  %-19s %-10s %10.2f %10.2f %7.2f / %-8s %s'%(
+                n['name'],n['kind'],up/gib,down/gib,used/gib,target,state))
+        if not nodes: print('  暂无节点')
+    else:
+        sys.exit('未知流量操作')
+PY_TRAFFIC
+}
+
+traffic_sample() {
+  [[ -f "$DB" && -f "$CONFIG" && -x "$BIN" ]] || return 0
+  grep -q '"xraymulti-stats"' "$CONFIG" || return 0
+  traffic_db sample ''
+}
+
+setup_traffic_monitor() {
+  # 保存自包含脚本供 systemd 定时器调用。
+  local source="${BASH_SOURCE[0]}"
+  if [[ "$source" != "$MANAGER_BIN" ]]; then
+    install -m 700 "$source" "$MANAGER_BIN.new" || die '安装流量监控脚本失败'
+    mv -f "$MANAGER_BIN.new" "$MANAGER_BIN"
+  fi
+  cat >"$TRAFFIC_UNIT" <<'EOF_TRAFFIC_UNIT'
+[Unit]
+Description=Xray Multi Per-node Quota Check
+After=xray-multi.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/xray-multi-manager traffic-check
+EOF_TRAFFIC_UNIT
+  cat >"$TRAFFIC_TIMER" <<'EOF_TRAFFIC_TIMER'
+[Unit]
+Description=Xray Multi Quota Timer
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=true
+Unit=xray-multi-traffic.service
+
+[Install]
+WantedBy=timers.target
+EOF_TRAFFIC_TIMER
+  chmod 644 "$TRAFFIC_UNIT" "$TRAFFIC_TIMER"
+  systemctl daemon-reload
+  systemctl enable --now xray-multi-traffic.timer >/dev/null || die '启用流量监控定时器失败'
+}
+
+traffic_check() {
+  [[ -f "$DB" && -f "$CONFIG" && -x "$BIN" ]] || return 0
+  traffic_sample || { warn '统计接口采样失败，本次未更新配额，请检查 Xray 服务。'; return 1; }
+  if traffic_db reached ''; then
+    make_candidate sync ''
+    apply_candidate || { warn '无法自动停用超额节点，请检查日志！'; return 1; }
+    info '超额节点已停用；重启 Xray 可能短暂中断其他节点的现有连接。'
+  fi
+}
+
+traffic_list() {
+  require_installed
+  traffic_sample || warn '无法采集即时流量，显示最后一次保存的结果。'
+  say '每个节点上传 + 下载累计流量'
+  traffic_db list ''
+}
+
+traffic_set() {
+  require_installed
+  local name="$1" gib="$2" limit
+  [[ -n "$name" ]] || { node_names; ask name '节点/转发名称' ''; }
+  valid_name "$name" || die '节点名称不合法'
+  [[ -n "$gib" ]] || ask gib '上限 GiB（0 不限制，上行+下行合计）' '10'
+  limit="$(python3 - "$gib" <<'PY_QUOTA_PARSE'
+from decimal import Decimal,InvalidOperation
+import sys
+try:
+    g=Decimal(sys.argv[1])
+    if not g.is_finite() or not 0<=g<=1000000: raise ValueError()
+    b=int(g*1024**3)
+    if g>0 and b==0: raise ValueError()
+    print(b)
+except (InvalidOperation,ValueError):
+    sys.exit('流量上限必须是 0-1000000 之间的 GiB 数值')
+PY_QUOTA_PARSE
+)" || die '无效的流量上限'
+  traffic_sample || warn '更改额度前未能采集即时流量。'
+  make_candidate quota "$name" '' "$limit"
+  apply_candidate || die '修改流量额度失败'
+  setup_traffic_monitor
+  info "节点 $name 流量额度已更新。0 表示不限。"
+  traffic_list
+}
+
+traffic_reset() {
+  require_installed
+  local name="$1"
+  [[ -n "$name" ]] || { traffic_list; ask name '清零哪个节点/转发规则' ''; }
+  valid_name "$name" || die '节点名称不合法'
+  traffic_sample || warn '清零前未能采集即时流量。'
+  traffic_db reset "$name" || die '重置流量失败'
+  make_candidate sync ''
+  apply_candidate || die '累计流量已重置，但重新启用节点失败'
+  info "节点 $name 的累计流量已清零。"
+  traffic_list
 }
 
 # REALITY 目标检测器：仅使用标准 Python 库，无需额外 Python 包。
@@ -989,6 +1233,12 @@ harden_reality() {
   info '全部 REALITY 配置已应用回落限速。请检查旧节点目标域名是否使用 Cloudflare。'
 }
 
+restart_managed_service() {
+  require_installed
+  traffic_sample || warn '重启前无法获取最新流量数据。'
+  systemctl restart "$SERVICE" && info '服务已重启。'
+}
+
 status() {
   if [[ -x "$BIN" ]]; then "$BIN" version | head -n 1; else warn '尚未安装 Xray。'; fi
   if [[ -f "$UNIT" ]]; then
@@ -1021,13 +1271,16 @@ uninstall_all() {
   else
     warn 'Xray 可执行文件并非由本脚本标记安装，保留以免影响其他程序。'
   fi
+  systemctl disable --now xray-multi-traffic.timer >/dev/null 2>&1 || true
+  rm -f "$TRAFFIC_UNIT" "$TRAFFIC_TIMER" "$MANAGER_BIN" "$MANAGER_BIN.new"
+  systemctl daemon-reload
   rm -rf -- "$CONF_DIR" "$DATA_DIR"
   info '已删除本工具的服务和所有管理数据。'
 }
 
 help_text() {
   cat <<'EOF'
-Xray 多配置管理器 v1.4（需要 root，Linux + systemd）
+Xray 多配置管理器 v1.5（需要 root，Linux + systemd）
 
 用法：sudo bash xray-manager.sh [命令] [节点名]
   不传参数        彩色中文交互菜单（文本输入支持左右方向键）
@@ -1044,6 +1297,10 @@ Xray 多配置管理器 v1.4（需要 root，Linux + systemd）
   forward-add     新增 A IP:端口 → B IP:端口 转发（TCP / UDP）
   forward-list    查看全部转发规则
   forward-delete  删除指定转发规则
+  quota-list      查看每个节点累计流量、配额和停用状态
+  quota-set 名称 GiB  设置独立流量额度（0 表示不限，支持小数）
+  quota-reset 名称    清零累计流量并重新启用超额节点
+  traffic-check   立即采样并执行自动停用（systemd 定时器调用）
   uninstall       卸载本工具管理的配置和 Xray
   help            显示帮助
 
@@ -1051,6 +1308,7 @@ Xray 多配置管理器 v1.4（需要 root，Linux + systemd）
   /etc/xray-multi/config.json          Xray 合并配置
   /var/lib/xray-multi/nodes.json       包含密钥的节点数据库（root 专用）
   /var/lib/xray-multi/qrcodes/         二维码（root 专用）
+  /var/lib/xray-multi/traffic.json     累计流量（root 专用）
   /etc/systemd/system/xray-multi.service
 
 提示：
@@ -1065,7 +1323,13 @@ Xray 多配置管理器 v1.4（需要 root，Linux + systemd）
      请留意同一目标可被大量并发回落连接滥用，仍需主机流量监控。
   4. 仅管理本工具创建的节点，不迁移系统已有 /usr/local/etc/xray 配置。
   5. 使用独立 systemd 服务 xray-multi，不接管已有 xray.service。
-  6. 端口转发规则和节点统一保存 /var/lib/xray-multi/nodes.json，支持失败回滚。
+  6. 单节点流量限制基于 Xray StatsService 入站统计，上下行字节相加；可用于代理节点及转发规则。
+     首次设置额度后安装每分钟运行的 systemd 定时器（xray-multi-traffic.timer）。
+     超额时从 Xray 的有效配置中停用对应节点，重置用量或调高额度可恢复。
+     这是分钟级配额，并非实时硬限速；峰值流量和非正常重启可能造成超额/漏计。
+     启停限额会重启 Xray，其他节点继续存在，但当前连接可能短暂中断。
+     仅统计 Xray 入站流量，不包含协议栈及运营商计费额外开销。
+  7. 端口转发规则和节点统一保存 /var/lib/xray-multi/nodes.json，支持失败回滚。
      转发不是加密隧道；公网监听应在防火墙限制来源 IP，防止刷流量。
      B 服务器通常看到 A 的出口 IP，而不是原始客户端 IP。
 EOF
@@ -1075,7 +1339,7 @@ menu() {
   local choice
   while :; do
     ui_home
-    ui_read choice "  › 请选择操作 [01-13 / 00 / Q]: " || break
+    ui_read choice "  › 请选择操作 [01-16 / 00 / Q]: " || break
     case "$choice" in
       1|01|2|02) install_xray ;;
       3|03) add_reality ;;
@@ -1084,11 +1348,14 @@ menu() {
       6|06) show_node ;;
       7|07) delete_node ;;
       8|08) status ;;
-      9|09) require_installed; systemctl restart "$SERVICE" && info '服务已重启。' ;;
+      9|09) restart_managed_service ;;
       10) harden_reality ;;
       11) add_forward ;;
       12) forward_list ;;
       13) delete_forward ;;
+      14) traffic_list ;;
+      15) traffic_set '' '' ;;
+      16) traffic_reset '' ;;
       0|00) uninstall_all ;;
       q|Q|quit|exit) break ;;
       *) warn '无效选项：请输入菜单中的编号。' ;;
@@ -1112,11 +1379,15 @@ main() {
     show) show_node "${2:-}" ;;
     delete) delete_node ;;
     status) status ;;
-    restart) require_installed; systemctl restart "$SERVICE"; info '服务已重启。' ;;
+    restart) restart_managed_service ;;
     harden) harden_reality ;;
     forward-add) add_forward ;;
     forward-list) forward_list ;;
     forward-delete) delete_forward ;;
+    quota-list|traffic-list) traffic_list ;;
+    quota-set) traffic_set "${2:-}" "${3:-}" ;;
+    quota-reset) traffic_reset "${2:-}" ;;
+    traffic-check) traffic_check ;;
     uninstall) uninstall_all ;;
     *) die '未知命令，请执行 bash xray-manager.sh help 查看帮助。' ;;
   esac
