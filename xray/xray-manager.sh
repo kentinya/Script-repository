@@ -444,7 +444,7 @@ port_available() {
   python3 - "$DB" "$port" "$name" <<'PY'
 import json,sys
 with open(sys.argv[1]) as f: d=json.load(f)
-assert all(int(n['port'])!=int(sys.argv[2]) for n in d['nodes']), '该端口已被其他 Xray 节点使用'
+assert all(int(n['port'])!=int(sys.argv[2]) for n in d['nodes']), '该端口已被其他托管节点或转发规则使用'
 assert all(n['name']!=sys.argv[3] for n in d['nodes']), '节点名称已存在'
 PY
   # 排除系统中其他进程已绑定的 TCP / UDP 端口。
@@ -521,6 +521,7 @@ elif action=='harden' or action=='sync':
 elif action=='quota':
     selected=next((n for n in nodes if n['name']==name),None)
     if selected is None: raise ValueError('找不到指定节点')
+    if selected.get('kind')=='forward': raise ValueError('GOST 转发不支持 Xray StatsService 配额')
     limit=int(port)
     if limit<0: raise ValueError('流量上限不能为负数')
     selected['quota_bytes']=limit
@@ -781,8 +782,9 @@ traffic_list() {
 traffic_set() {
   require_installed
   local name="$1" gib="$2" limit
-  [[ -n "$name" ]] || { node_names; ask name '节点/转发名称' ''; }
+  [[ -n "$name" ]] || { node_names; ask name '节点名称' ''; }
   valid_name "$name" || die '节点名称不合法'
+  forward_exists "$name" && die 'GOST 转发不使用 Xray StatsService，当前不支持此流量配额功能。'
   [[ -n "$gib" ]] || ask gib '上限 GiB（0 不限制，上行+下行合计）' '10'
   limit="$(python3 - "$gib" <<'PY_QUOTA_PARSE'
 from decimal import Decimal,InvalidOperation
@@ -808,8 +810,9 @@ PY_QUOTA_PARSE
 traffic_reset() {
   require_installed
   local name="$1"
-  [[ -n "$name" ]] || { traffic_list; ask name '清零哪个节点/转发规则' ''; }
+  [[ -n "$name" ]] || { traffic_list; ask name '清零哪个节点' ''; }
   valid_name "$name" || die '节点名称不合法'
+  forward_exists "$name" && die 'GOST 转发没有 Xray 流量记录可清零。'
   traffic_sample || warn '清零前未能采集即时流量。'
   traffic_db reset "$name" || die '重置流量失败'
   make_candidate sync ''
@@ -1607,7 +1610,7 @@ Xray 多配置管理器 v1.5（需要 root，Linux + systemd）
   quota-set 名称 GiB  设置独立流量额度（0 表示不限，支持小数）
   quota-reset 名称    清零累计流量并重新启用超额节点
   traffic-check   立即采样并执行自动停用（systemd 定时器调用）
-  uninstall       卸载本工具管理的配置和 Xray
+  uninstall       卸载本工具管理的 Xray、GOST 转发及配置
   help            显示帮助
 
 路径：
@@ -1641,7 +1644,8 @@ Xray 多配置管理器 v1.5（需要 root，Linux + systemd）
      启停限额会重启 Xray，其他节点继续存在，但当前连接可能短暂中断。
      仅统计 Xray 入站流量，不包含协议栈及运营商计费额外开销。
   7. 端口转发规则和节点统一保存 /var/lib/xray-multi/nodes.json，支持失败回滚。
-     转发由独立 xray-multi-forward.service（GOST v3）运行，不再写入 Xray inbounds。\n     GOST 转发不是加密隧道；公网监听应在防火墙限制来源 IP，防止刷流量。
+     转发由独立 xray-multi-forward.service（GOST v3）运行，不再写入 Xray inbounds。
+     GOST 转发不是加密隧道；公网监听应在防火墙限制来源 IP，防止刷流量。
      B 服务器通常看到 A 的出口 IP，而不是原始客户端 IP。
 EOF
 }
