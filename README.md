@@ -4,7 +4,7 @@ Linux / VPS 实用脚本合集。各工具的使用方法与注意事项请查�
 
 | 工具 | 主要用途 | 使用说明 |
 | --- | --- | --- |
-| **[Xray Multi](xray/)** | Xray 安装、REALITY / Shadowsocks 节点、TCP/UDP 转发、单节点累计流量配额 | [Xray 说明](xray/README.md) |
+| **[Xray Multi](xray/)** | Xray 安装、REALITY / Shadowsocks 节点、GOST TCP/UDP 转发、Xray 节点累计流量配额 | [Xray 说明](xray/README.md) |
 | **[addswap](addswap/)** | 交互式创建 Swap 文件并写入开机挂载配置 | [Swap 说明](addswap/README.md) |
 | **[ip2location](ip2location/)** | 查询本机公网 IPv4 / IPv6 的地理位置、ASN 和代理标记 | [IP 查询说明](ip2location/README.md) |
 
