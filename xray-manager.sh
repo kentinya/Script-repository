@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Xray 多节点管理器 v1.4：VLESS + Vision + REALITY / Shadowsocks 2022
+# Xray 多节点管理器 v1.5：VLESS + Vision + REALITY / Shadowsocks 2022
 # 支持 Linux + systemd，建议 Debian 12 / Ubuntu 22.04+ / Rocky Linux 9。
 # 使用：sudo bash xray-manager.sh    或 sudo bash xray-manager.sh help
 set -Eeuo pipefail
@@ -102,7 +102,7 @@ PY_NODE_COUNT
   printf '%s' "$UI_ACCENT"
   cat <<'EOF_UI_BANNER'
   ╭──────────────────────────────────────────────────────────────╮
-  │  ◆  X R A Y   M U L T I                            v1.4     │
+  │  ◆  X R A Y   M U L T I                            v1.5     │
   │     多协议 · 多节点 · 一站式安全管理                          │
   ╰──────────────────────────────────────────────────────────────╯
 EOF_UI_BANNER
@@ -128,6 +128,10 @@ EOF_UI_BANNER
   printf '  %s[11]%s  新增 TCP / UDP 转发        %s[12]%s  查看转发规则\n' \
     "$UI_ACCENT" "$UI_RESET" "$UI_ACCENT" "$UI_RESET"
   ui_item '13' '删除转发规则'
+  ui_section '单节点流量'
+  printf '  %s[14]%s  查看流量统计              %s[15]%s  设置单节点流量额度\n' \
+    "$UI_ACCENT" "$UI_RESET" "$UI_ACCENT" "$UI_RESET"
+  ui_item '16' '节点流量清零 / 恢复超额节点'
   ui_section '退出与卸载'
   printf '  %s[00]%s  卸载与删除全部节点 %s(危险)%s    %s[Q]%s   退出\n' \
     "$UI_BAD" "$UI_RESET" "$UI_BAD" "$UI_RESET" "$UI_ACCENT" "$UI_RESET"
@@ -263,6 +267,9 @@ PY
     old_bin="$temp/xray.old"
     cp -p "$BIN" "$old_bin"
   fi
+  if [[ -f "$CONFIG" ]] && grep -q '"xraymulti-stats"' "$CONFIG"; then
+    traffic_sample || warn '更新内核前流量采集失败，可能损失最后一个采样区间的统计。'
+  fi
   install -m 755 "$temp/xray" "$BIN"
   create_layout
   touch "$MARKER"
@@ -280,6 +287,7 @@ PY
     fi
     die '服务启动失败，请执行 journalctl -u xray-multi -n 50 查看原因。'
   fi
+  if [[ -f "$TRAFFIC_TIMER" ]]; then setup_traffic_monitor; fi
   info "Xray ${latest} 已安装/更新，服务 ${SERVICE} 运行中。"
   rm -rf -- "$temp"
   trap - EXIT
@@ -1213,6 +1221,12 @@ harden_reality() {
   info '全部 REALITY 配置已应用回落限速。请检查旧节点目标域名是否使用 Cloudflare。'
 }
 
+restart_managed_service() {
+  require_installed
+  traffic_sample || warn '重启前无法获取最新流量数据。'
+  systemctl restart "$SERVICE" && info '服务已重启。'
+}
+
 status() {
   if [[ -x "$BIN" ]]; then "$BIN" version | head -n 1; else warn '尚未安装 Xray。'; fi
   if [[ -f "$UNIT" ]]; then
@@ -1245,13 +1259,16 @@ uninstall_all() {
   else
     warn 'Xray 可执行文件并非由本脚本标记安装，保留以免影响其他程序。'
   fi
+  systemctl disable --now xray-multi-traffic.timer >/dev/null 2>&1 || true
+  rm -f "$TRAFFIC_UNIT" "$TRAFFIC_TIMER" "$MANAGER_BIN"
+  systemctl daemon-reload
   rm -rf -- "$CONF_DIR" "$DATA_DIR"
   info '已删除本工具的服务和所有管理数据。'
 }
 
 help_text() {
   cat <<'EOF'
-Xray 多配置管理器 v1.4（需要 root，Linux + systemd）
+Xray 多配置管理器 v1.5（需要 root，Linux + systemd）
 
 用法：sudo bash xray-manager.sh [命令] [节点名]
   不传参数        彩色中文交互菜单（文本输入支持左右方向键）
@@ -1268,6 +1285,10 @@ Xray 多配置管理器 v1.4（需要 root，Linux + systemd）
   forward-add     新增 A IP:端口 → B IP:端口 转发（TCP / UDP）
   forward-list    查看全部转发规则
   forward-delete  删除指定转发规则
+  quota-list      查看每个节点累计流量、配额和停用状态
+  quota-set 名称 GiB  设置独立流量额度（0 表示不限，支持小数）
+  quota-reset 名称    清零累计流量并重新启用超额节点
+  traffic-check   立即采样并执行自动停用（systemd 定时器调用）
   uninstall       卸载本工具管理的配置和 Xray
   help            显示帮助
 
@@ -1275,6 +1296,7 @@ Xray 多配置管理器 v1.4（需要 root，Linux + systemd）
   /etc/xray-multi/config.json          Xray 合并配置
   /var/lib/xray-multi/nodes.json       包含密钥的节点数据库（root 专用）
   /var/lib/xray-multi/qrcodes/         二维码（root 专用）
+  /var/lib/xray-multi/traffic.json     累计流量（root 专用）
   /etc/systemd/system/xray-multi.service
 
 提示：
@@ -1289,7 +1311,12 @@ Xray 多配置管理器 v1.4（需要 root，Linux + systemd）
      请留意同一目标可被大量并发回落连接滥用，仍需主机流量监控。
   4. 仅管理本工具创建的节点，不迁移系统已有 /usr/local/etc/xray 配置。
   5. 使用独立 systemd 服务 xray-multi，不接管已有 xray.service。
-  6. 端口转发规则和节点统一保存 /var/lib/xray-multi/nodes.json，支持失败回滚。
+  6. 单节点流量限制基于 Xray StatsService 入站统计，上下行字节相加；可用于代理节点及转发规则。
+     首次设置额度后安装每分钟运行的 systemd 定时器（xray-multi-traffic.timer）。
+     超额时从 Xray 的有效配置中停用对应节点，重置用量或调高额度可恢复。
+     这是分钟级配额，并非实时硬限速；峰值流量和非正常重启可能造成少量超额/漏计。
+     仅统计 Xray 入站流量，不包含协议栈及运营商计费额外开销。
+  7. 端口转发规则和节点统一保存 /var/lib/xray-multi/nodes.json，支持失败回滚。
      转发不是加密隧道；公网监听应在防火墙限制来源 IP，防止刷流量。
      B 服务器通常看到 A 的出口 IP，而不是原始客户端 IP。
 EOF
@@ -1299,7 +1326,7 @@ menu() {
   local choice
   while :; do
     ui_home
-    ui_read choice "  › 请选择操作 [01-13 / 00 / Q]: " || break
+    ui_read choice "  › 请选择操作 [01-16 / 00 / Q]: " || break
     case "$choice" in
       1|01|2|02) install_xray ;;
       3|03) add_reality ;;
@@ -1308,11 +1335,14 @@ menu() {
       6|06) show_node ;;
       7|07) delete_node ;;
       8|08) status ;;
-      9|09) require_installed; systemctl restart "$SERVICE" && info '服务已重启。' ;;
+      9|09) restart_managed_service ;;
       10) harden_reality ;;
       11) add_forward ;;
       12) forward_list ;;
       13) delete_forward ;;
+      14) traffic_list ;;
+      15) traffic_set '' '' ;;
+      16) traffic_reset '' ;;
       0|00) uninstall_all ;;
       q|Q|quit|exit) break ;;
       *) warn '无效选项：请输入菜单中的编号。' ;;
@@ -1336,11 +1366,15 @@ main() {
     show) show_node "${2:-}" ;;
     delete) delete_node ;;
     status) status ;;
-    restart) require_installed; systemctl restart "$SERVICE"; info '服务已重启。' ;;
+    restart) restart_managed_service ;;
     harden) harden_reality ;;
     forward-add) add_forward ;;
     forward-list) forward_list ;;
     forward-delete) delete_forward ;;
+    quota-list|traffic-list) traffic_list ;;
+    quota-set) traffic_set "${2:-}" "${3:-}" ;;
+    quota-reset) traffic_reset "${2:-}" ;;
+    traffic-check) traffic_check ;;
     uninstall) uninstall_all ;;
     *) die '未知命令，请执行 bash xray-manager.sh help 查看帮助。' ;;
   esac
