@@ -10,8 +10,8 @@
 - 创建、查看、删除 **VLESS + Vision + REALITY** 节点。
 - 创建、查看、删除 **Shadowsocks 2022** 节点（TCP + UDP）。
 - 显示节点分享链接、终端二维码，生成 PNG 二维码。
-- 创建 **A 服务器 IP:端口 → B 服务器 IP/域名:端口** 的 TCP、UDP 或 TCP+UDP 转发规则。
-- 给每个代理节点或转发规则单独设置 **累计上传 + 下载流量配额**，到额自动停用，支持清零恢复。
+- 创建 **A 服务器 IP:端口 → B 服务器 IP/域名:端口** 的 TCP、UDP 或 TCP+UDP 转发规则；转发由独立 **GOST v3** 服务承担，不再进入 Xray inbounds。
+- 给每个 Xray 代理节点单独设置 **累计上传 + 下载流量配额**，到额自动停用，支持清零恢复；GOST 转发不使用 Xray StatsService，因此当前不参与此配额。
 - REALITY 支持随机 SNI 候选、TLS 检测、按 VPS 出口地理位置偏好选取和 Cloudflare 网段排除；支持回落连接限速加固。
 - 彩色交互菜单；交互式文字输入支持方向键、Home/End 编辑。
 
@@ -21,7 +21,7 @@
 
 - Linux，且 **systemd 正常运行**；需要 `root` 权限。
 - 建议 Debian 12、Ubuntu 22.04 及以上、Rocky Linux 9；脚本也包含其他部分发行版包管理器适配，但未保证全部发行版。
-- VPS 可以访问 GitHub（下载 Xray 正式版）、域名 DNS 和所选 REALITY 伪装目标。
+- VPS 可以访问 GitHub（下载 Xray 与 GOST 正式版）、域名 DNS 和所选 REALITY 伪装目标。
 - 脚本会尝试自动安装缺少的依赖，包括 `curl`、`unzip`、`openssl`、`python3`、`qrencode`、`iproute2`、`util-linux` 等。
 - 云平台安全组和系统防火墙需要放通你实际选择的监听端口；转发还需要确保 B 服务器允许来自 A 的连接。
 
@@ -64,7 +64,7 @@ bash xray-manager.sh help
 | `07` | 删除指定代理节点 |
 | `08` / `09` | 查看服务状态 / 重启服务 |
 | `10` | REALITY 未认证回落限速加固 |
-| `11` / `12` / `13` | 新增 / 查看 / 删除端口转发规则 |
+| `11` / `12` / `13` | 新增 / 查看 / 删除 GOST 端口转发规则 |
 | `14` | 查看节点与转发规则累计流量 |
 | `15` | 设置单节点流量配额 |
 | `16` | 清零流量，恢复因超额停用的节点 |
@@ -135,9 +135,11 @@ sudo bash xray-manager.sh reality-check reality-hk
 
 分享链接、二维码包含访问凭据；请勿发布到公开页面。
 
-## 7. A → B 端口转发
+## 7. A → B 端口转发（GOST）
 
 适用场景：客户端连接 **A 服务器的监听端口**，A 再把 TCP 或 UDP 流量转发到 **B 服务器的目标端口**。不需要在 B 上运行本管理脚本（但 B 的服务必须可达）。
+
+从当前版本开始，端口转发**不再使用 Xray 的 `tunnel/dokodemo-door` 入站**。脚本会从 GOST 官方 Release 安装 GOST v3 到自己的目录，并使用独立的 `xray-multi-forward.service` 运行转发；Xray 的 `xray-multi.service` 只负责代理节点和 StatsService。这样转发异常不会与 Xray 主进程共享连接和内存。
 
 选择菜单 `11`（或 `sudo bash xray-manager.sh forward-add`），依次填写：
 
@@ -150,13 +152,15 @@ sudo bash xray-manager.sh reality-check reality-hk
 | B 目标端口 | `443` | B 的服务端口 |
 | 协议 | `1` / `2` / `3` | TCP / UDP / TCP+UDP |
 
-保存后，客户端连接的是 `A公网IP:10086`，由 A 访问 `B实际IP:443`。查看转发菜单选 `12`，删除选 `13`（需输入 `YES` 确认）。
+保存后，规则仍保存在 `/var/lib/xray-multi/nodes.json`，但脚本会生成 `/etc/xray-multi/gost-forward.json`，由 GOST 监听 A 端口并直连 B。查看转发菜单选 `12`，删除选 `13`（需输入 `YES` 确认）。
+
+如果数据库中已有旧版 Xray 转发规则，执行一次 `install` / `update` 会把这些规则从 Xray 配置移除并迁移到 GOST 服务，规则名称、监听地址、目标地址和协议保持不变。
 
 **转发说明**：这不是 VPN/加密隧道，B 通常看到的是 A 的出口 IP，而非客户端原始 IP。`0.0.0.0` 会监听全部 IPv4 网卡，建议限制允许访问 A 的源地址，避免成为公开转发入口。需要放行 A 的监听端口，同时保证 B 接受来自 A 的请求。
 
 ## 8. 单节点累计流量配额
 
-适用于 REALITY、Shadowsocks 2022 以及本工具建立的转发规则。每个条目单独累计**上传 + 下载**，额度单位为 **GiB（1 GiB = 1024³ 字节）**，支持小数。
+适用于 REALITY、Shadowsocks 2022 等 **Xray 代理节点**。每个节点单独累计**上传 + 下载**，额度单位为 **GiB（1 GiB = 1024³ 字节）**，支持小数。GOST 转发不通过 Xray StatsService，因此当前不支持这里的累计配额。
 
 ~~~bash
 # 查看各条目的上传/下载、累计用量、额度和状态
@@ -164,9 +168,6 @@ sudo bash xray-manager.sh quota-list
 
 # 给名为 reality-hk 的节点设置总量 10 GiB
 sudo bash xray-manager.sh quota-set reality-hk 10
-
-# 单条转发规则也可以独立限额
-sudo bash xray-manager.sh quota-set to-backend 2.5
 
 # 设为 0 表示取消配额
 sudo bash xray-manager.sh quota-set reality-hk 0
@@ -213,13 +214,16 @@ bash xray-manager.sh help                 # 命令行帮助
 | 路径 / 服务名 | 用途 |
 | --- | --- |
 | `/usr/local/bin/xray` | 脚本安装的 Xray 可执行文件 |
-| `/etc/xray-multi/config.json` | 生效的 Xray 合并配置 |
+| `/usr/local/lib/xray-multi/gost` | 本工具私有的 GOST v3 可执行文件 |
+| `/etc/xray-multi/config.json` | 生效的 Xray 合并配置（不含端口转发） |
+| `/etc/xray-multi/gost-forward.json` | GOST 端口转发配置 |
 | `/etc/xray-multi/reality-targets.txt` | 可选的随机 SNI 候选池 |
 | `/var/lib/xray-multi/nodes.json` | 节点、转发及密钥数据库 |
 | `/var/lib/xray-multi/traffic.json` | 持久化累计流量 |
 | `/var/lib/xray-multi/qrcodes/` | 分享二维码 PNG |
-| `xray-multi.service` | 本工具管理的 Xray 服务 |
-| `xray-multi-traffic.timer` | 配额采样定时器（设置额度后启用） |
+| `xray-multi.service` | 本工具管理的 Xray 代理服务 |
+| `xray-multi-forward.service` | 本工具管理的 GOST 端口转发服务 |
+| `xray-multi-traffic.timer` | Xray 节点配额采样定时器（设置额度后启用） |
 
 数据库、二维码及密钥仅应由管理员读取；**不要公开上传配置、流量文件或二维码**。
 
@@ -229,7 +233,9 @@ bash xray-manager.sh help                 # 命令行帮助
 
 ~~~bash
 sudo systemctl status xray-multi --no-pager
+sudo systemctl status xray-multi-forward --no-pager
 sudo journalctl -u xray-multi -n 100 --no-pager
+sudo journalctl -u xray-multi-forward -n 100 --no-pager
 sudo ss -lntup
 ~~~
 
@@ -245,7 +251,7 @@ sudo journalctl -u xray-multi-traffic.service -n 100 --no-pager
 sudo bash xray-manager.sh traffic-check
 ~~~
 
-**端口转发不通**：确认 A 实际监听地址、A 入站防火墙、B 的目标服务及 B 对 A 出口 IP 的访问权限；UDP 应使用 UDP 测试工具确认，不能只用 TCP 连接测试代替。
+**端口转发不通**：先检查 `xray-multi-forward.service` 和 `/etc/xray-multi/gost-forward.json`，再确认 A 实际监听地址、A 入站防火墙、B 的目标服务及 B 对 A 出口 IP 的访问权限；UDP 应使用 UDP 测试工具确认，不能只用 TCP 连接测试代替。转发已与 Xray 主进程分离，不要再到 Xray `inbounds` 中寻找 `forward-*`。
 
 ## 12. 卸载
 
@@ -255,6 +261,6 @@ sudo bash xray-manager.sh traffic-check
 sudo bash xray-manager.sh uninstall
 ~~~
 
-按提示输入 **`REMOVE`** 才会继续。卸载会清除本脚本管理的全部节点、转发规则、配置、二维码、流量记录及相关 systemd 服务；不可恢复。若脚本检测到其他正在使用 Xray 的服务，或二进制文件不是由本工具标记安装，可能保留 `/usr/local/bin/xray` 以避免影响其他程序。
+按提示输入 **`REMOVE`** 才会继续。卸载会清除本脚本管理的全部节点、转发规则、Xray/GOST 配置、二维码、流量记录及相关 systemd 服务，并删除本工具私有的 GOST 二进制；不可恢复。若脚本检测到其他正在使用 Xray 的服务，或二进制文件不是由本工具标记安装，可能保留 `/usr/local/bin/xray` 以避免影响其他程序。
 
 **建议在卸载或迁移前备份重要资料**，并确保备份文件的访问权限安全。
