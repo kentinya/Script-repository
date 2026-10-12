@@ -33,6 +33,7 @@ source "$work/functions.sh"
 
 install_gost() { :; }
 write_gost_unit() { :; }
+chown() { :; }
 systemctl() {
   if [[ "${1:-}" == is-active ]]; then return 0; fi
   return 0
