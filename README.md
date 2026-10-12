@@ -1,69 +1,34 @@
 # Script Repository
 
-## Xray 多节点管理器（v1.5）
+Linux / VPS 实用脚本合集。各工具的使用方法与注意事项请查看对应目录下的 README。
 
-支持 VLESS + Vision + REALITY、Shadowsocks 2022、TCP / UDP 端口转发，以及每个节点独立的累计流量配额。
+| 工具 | 主要用途 | 使用说明 |
+| --- | --- | --- |
+| **[Xray Multi](xray/)** | Xray 安装、REALITY / Shadowsocks 节点、TCP/UDP 转发、单节点累计流量配额 | [Xray 说明](xray/README.md) |
+| **[addswap](addswap/)** | 交互式创建 Swap 文件并写入开机挂载配置 | [Swap 说明](addswap/README.md) |
+| **[ip2location](ip2location/)** | 查询本机公网 IPv4 / IPv6 的地理位置、ASN 和代理标记 | [IP 查询说明](ip2location/README.md) |
 
-- [Xray 脚本与测试（xray/）](xray/)
-- **[Xray 详细使用说明](xray/README.md)**（安装、菜单、节点、随机 SNI、端口转发、流量配额、排错与卸载）
+## 快速使用
 
-快速安装及启动：
+**Xray Multi（需要 root）：**
 
 ```bash
-curl -fsSLo xray-manager.sh https://raw.githubusercontent.com/kentinya/Script-repository/main/xray/xray-manager.sh
+curl -fL -o xray-manager.sh https://raw.githubusercontent.com/kentinya/Script-repository/main/xray/xray-manager.sh
 sudo bash xray-manager.sh
 ```
 
-首次打开菜单选择 **01** 安装 Xray；再次管理可运行 `sudo bash xray-manager.sh`。使用 `bash xray-manager.sh help` 查看命令行帮助。
+**Swap 文件创建（需要 root；运行前请阅读覆盖文件与 /etc/fstab 的注意事项）：**
 
-> 单节点流量配额是分钟级累计上/下行额度，不是硬实时限速。请同时配置防火墙及云平台流量告警。
-
-## 增加虚拟内存脚本
-### 功能
-- 增加VPS虚拟内存
-### 使用
 ```bash
-wget -N https://raw.githubusercontent.com/kentinya/Script-repository/main/addswap/addswap.sh && chmod +x addswap.sh
-```
-``` bash
-bash addswap.sh
+curl -fL -o addswap.sh https://raw.githubusercontent.com/kentinya/Script-repository/main/addswap/addswap.sh
+sudo bash addswap.sh
 ```
 
-## ip2location判断ip
-### 功能
-- 判断ip
+**IP2Location 查询（需要 curl、jq 及 IPv4/IPv6 连通性）：**
 
-### 使用
 ```bash
-wget -N https://raw.githubusercontent.com/kentinya/Script-repository/main/ip2location/checkip.sh && chmod +x checkip.sh
-```
-``` bash
+curl -fL -o checkip.sh https://raw.githubusercontent.com/kentinya/Script-repository/main/ip2location/checkip.sh
 bash checkip.sh
 ```
-## 生成strm文件
 
-### 功能
-- 根据分类、文件路径和根路径自动生成strm文件到指定文件夹
-
-### 使用
-```bash
-wget -N https://raw.githubusercontent.com/kentinya/Script-repository/main/creat_strm/create_strm.py && chmod +x create_strm.py
-```
-``` bash
-python3 create_strm.py "保存路径" "内容路径" "分类"
-```
-
-## 修改strm内容
-
-### 功能
-
--  修改strm文件内的路径
-
-### 使用
-
-```bash
-wget -N https://raw.githubusercontent.com/kentinya/Script-repository/main/creat_strm/replace_str_in_strm.sh && chmod +x replace_str_in_strm.sh
-```
-```bash
-bash replace_str_in_strm.sh
-```
+> 使用脚本前请阅读各目录的说明。尤其是 Swap 脚本会覆盖指定目标文件并追加 `/etc/fstab`，请勿未经检查直接重复运行。
