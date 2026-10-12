@@ -513,6 +513,198 @@ apply_candidate() {
   return 0
 }
 
+
+# StatsService 采样与累计存档。两次采样间的进程重启可能遗漏部分流量。
+traffic_db() {
+  python3 - "$DB" "$TRAFFIC_STATE" "$BIN" "$STATS_PORT" "$SERVICE" "$1" "$2" <<'PY_TRAFFIC'
+import fcntl,json,os,subprocess,sys,tempfile,time
+db_path,path,xray,port,service,action,name=sys.argv[1:]
+with open(db_path,encoding='utf-8') as f: nodes=json.load(f).get('nodes',[])
+os.makedirs(os.path.dirname(path),exist_ok=True)
+def run(argv):
+    return subprocess.run(argv,check=True,capture_output=True,text=True,timeout=8).stdout.strip()
+def epoch_id():
+    pid=int(run(['systemctl','show','-p','MainPID','--value',service]))
+    if pid<=0: raise RuntimeError('Xray 未运行')
+    with open('/proc/%d/stat'%pid) as f: raw=f.read()
+    start=raw[raw.rfind(')')+2:].split()[19]
+    with open('/proc/sys/kernel/random/boot_id') as f: boot=f.read().strip()
+    return '%s:%d:%s'%(boot,pid,start)
+def save(data):
+    fd,tmp=tempfile.mkstemp(dir=os.path.dirname(path),prefix='.traffic-')
+    try:
+        with os.fdopen(fd,'w',encoding='utf-8') as f:
+            os.fchmod(f.fileno(),0o600)
+            json.dump(data,f,ensure_ascii=False,indent=2)
+            f.write('\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp,path)
+    finally:
+        if os.path.exists(tmp): os.unlink(tmp)
+with open(path+'.lock','a+') as lock:
+    os.chmod(path+'.lock',0o600)
+    fcntl.flock(lock,fcntl.LOCK_EX)
+    try:
+        with open(path,encoding='utf-8') as f: data=json.load(f)
+    except FileNotFoundError:
+        data={'nodes':{}}
+    records=data.setdefault('nodes',{})
+    if action=='sample':
+        epoch=epoch_id()
+        output=run([xray,'api','statsquery','--server=127.0.0.1:'+port,'--pattern=inbound>>>'])
+        if epoch!=epoch_id(): raise RuntimeError('采样时 Xray 已重启')
+        counters={s['name']:int(s['value']) for s in json.loads(output or '{}').get('stat',[]) if 'name' in s}
+        for n in nodes:
+            qid=n.get('quota_id')
+            if not qid: continue
+            tag={'reality':'reality-','ss2022':'ss2022-','forward':'forward-'}.get(n['kind'],'')+n['name']
+            rec=records.setdefault(qid,{'uplink':0,'downlink':0,'last_up':0,'last_down':0,'epoch':''})
+            for key,last in (('uplink','last_up'),('downlink','last_down')):
+                current=counters.get('inbound>>>%s>>>traffic>>>%s'%(tag,key),0)
+                previous=int(rec.get(last,0))
+                delta=max(0,current-previous) if rec.get('epoch')==epoch and current>=previous else current
+                rec[key]=int(rec.get(key,0))+delta
+                rec[last]=current
+            rec['epoch']=epoch
+            rec['sample_at']=int(time.time())
+        save(data)
+    elif action=='reset':
+        node=next((n for n in nodes if n['name']==name),None)
+        if node is None: sys.exit('找不到指定节点')
+        qid=node.get('quota_id')
+        if not qid: sys.exit('节点 ID 尚未初始化')
+        rec=records.setdefault(qid,{})
+        rec['uplink']=0
+        rec['downlink']=0
+        save(data)
+    elif action=='reached':
+        with open('/etc/xray-multi/config.json',encoding='utf-8') as f:
+            active={n.get('tag') for n in json.load(f).get('inbounds',[])}
+        for n in nodes:
+            limit=int(n.get('quota_bytes',0))
+            rec=records.get(n.get('quota_id'),{})
+            used=int(rec.get('uplink',0))+int(rec.get('downlink',0))
+            tag={'reality':'reality-','ss2022':'ss2022-','forward':'forward-'}.get(n['kind'],'')+n['name']
+            if limit>0 and used>=limit and tag in active:
+                print('  节点 %s 已超额：%d / %d 字节'%(n['name'],used,limit))
+                sys.exit(0)
+        sys.exit(1)
+    elif action=='list':
+        gib=1024**3
+        print('  %-19s %-10s %10s %10s %17s  %s'%('名称','类型','上传GiB','下载GiB','已用/限额 GiB','状态'))
+        for n in nodes:
+            rec=records.get(n.get('quota_id'),{})
+            up=int(rec.get('uplink',0)); down=int(rec.get('downlink',0))
+            limit=int(n.get('quota_bytes',0)); used=up+down
+            target='不限' if limit==0 else '%.2f'%(limit/gib)
+            state='已停用' if limit>0 and used>=limit else '正常'
+            print('  %-19s %-10s %10.2f %10.2f %7.2f / %-8s %s'%(
+                n['name'],n['kind'],up/gib,down/gib,used/gib,target,state))
+        if not nodes: print('  暂无节点')
+    else:
+        sys.exit('未知流量操作')
+PY_TRAFFIC
+}
+
+traffic_sample() {
+  [[ -f "$DB" && -f "$CONFIG" && -x "$BIN" ]] || return 0
+  grep -q '"xraymulti-stats"' "$CONFIG" || return 0
+  traffic_db sample ''
+}
+
+setup_traffic_monitor() {
+  # 保存自包含脚本供 systemd 定时器调用。
+  local source="${BASH_SOURCE[0]}"
+  if [[ "$source" != "$MANAGER_BIN" ]]; then
+    install -m 700 "$source" "$MANAGER_BIN" || die '安装流量监控脚本失败'
+  fi
+  cat >"$TRAFFIC_UNIT" <<'EOF_TRAFFIC_UNIT'
+[Unit]
+Description=Xray Multi Per-node Quota Check
+After=xray-multi.service
+Requires=xray-multi.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/xray-multi-manager traffic-check
+EOF_TRAFFIC_UNIT
+  cat >"$TRAFFIC_TIMER" <<'EOF_TRAFFIC_TIMER'
+[Unit]
+Description=Xray Multi Quota Timer
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Persistent=true
+Unit=xray-multi-traffic.service
+
+[Install]
+WantedBy=timers.target
+EOF_TRAFFIC_TIMER
+  chmod 644 "$TRAFFIC_UNIT" "$TRAFFIC_TIMER"
+  systemctl daemon-reload
+  systemctl enable --now xray-multi-traffic.timer >/dev/null || die '启用流量监控定时器失败'
+}
+
+traffic_check() {
+  [[ -f "$DB" && -f "$CONFIG" && -x "$BIN" ]] || return 0
+  traffic_sample || { warn '统计接口采样失败，本次未更新配额，请检查 Xray 服务。'; return 1; }
+  if traffic_db reached ''; then
+    make_candidate sync ''
+    apply_candidate || { warn '无法自动停用超额节点，请检查日志！'; return 1; }
+    info '已自动停用超额节点，其他节点不受影响。'
+  fi
+}
+
+traffic_list() {
+  require_installed
+  traffic_sample || warn '无法采集即时流量，显示最后一次保存的结果。'
+  say '每个节点上传 + 下载累计流量'
+  traffic_db list ''
+}
+
+traffic_set() {
+  require_installed
+  local name="$1" gib="$2" limit
+  [[ -n "$name" ]] || { node_names; ask name '节点/转发名称' ''; }
+  valid_name "$name" || die '节点名称不合法'
+  [[ -n "$gib" ]] || ask gib '上限 GiB（0 不限制，上行+下行合计）' '10'
+  limit="$(python3 - "$gib" <<'PY_QUOTA_PARSE'
+from decimal import Decimal,InvalidOperation
+import sys
+try:
+    g=Decimal(sys.argv[1])
+    if not g.is_finite() or not 0<=g<=1000000: raise ValueError()
+    b=int(g*1024**3)
+    if g>0 and b==0: raise ValueError()
+    print(b)
+except (InvalidOperation,ValueError):
+    sys.exit('流量上限必须是 0-1000000 之间的 GiB 数值')
+PY_QUOTA_PARSE
+)" || die '无效的流量上限'
+  traffic_sample || warn '更改额度前未能采集即时流量。'
+  make_candidate quota "$name" '' "$limit"
+  apply_candidate || die '修改流量额度失败'
+  setup_traffic_monitor
+  info "节点 $name 流量额度已更新。0 表示不限。"
+  traffic_list
+}
+
+traffic_reset() {
+  require_installed
+  local name="$1"
+  [[ -n "$name" ]] || { traffic_list; ask name '清零哪个节点/转发规则' ''; }
+  valid_name "$name" || die '节点名称不合法'
+  traffic_sample || warn '清零前未能采集即时流量。'
+  traffic_db reset "$name" || die '重置流量失败'
+  make_candidate sync ''
+  apply_candidate || die '累计流量已重置，但重新启用节点失败'
+  info "节点 $name 的累计流量已清零。"
+  traffic_list
+}
+
 # REALITY 目标检测器：仅使用标准 Python 库，无需额外 Python 包。
 # random: 本机出口 IP 的 ASN > 国家 > 洲 匹配优先；verify: 校验手工 SNI/目标。
 # Cloudflare 已知 IP 段 / ASN 13335 强制拒绝；不成功时不会静默放行。
