@@ -16,6 +16,11 @@ UNIT='/etc/systemd/system/xray-multi.service'
 SERVICE='xray-multi.service'
 RUN_USER='xraymulti'
 MARKER="$DATA_DIR/installed-by-xray-multi"
+TRAFFIC_STATE="$DATA_DIR/traffic.json"
+STATS_PORT=18785
+MANAGER_BIN='/usr/local/sbin/xray-multi-manager'
+TRAFFIC_UNIT='/etc/systemd/system/xray-multi-traffic.service'
+TRAFFIC_TIMER='/etc/systemd/system/xray-multi-traffic.timer'
 
 # 终端视觉风格参考 Gum：强调色、分组、状态提示；不依赖额外 TUI 程序。
 # 非交互环境、TERM=dumb、NO_COLOR 自动禁用 ANSI 控制符。
@@ -321,6 +326,7 @@ valid_sni() {
 }
 
 port_available() {
+  [[ "$1" != "$STATS_PORT" ]] || die "端口 $STATS_PORT 已保留给本机 Xray 统计 API。"
   local port="$1" name="$2"
   # 已由本工具管理的监听端口，双协议均不允许同端口复用。
   python3 - "$DB" "$port" "$name" <<'PY'
@@ -361,11 +367,11 @@ make_candidate() {
         sni="${10:-}" dest="${11:-}" method="${12:-}" psk="${13:-}"
   local candidate_db="$DATA_DIR/.nodes.pending.json" candidate_config="$CONF_DIR/.config.pending.json"
   rm -f "$candidate_db" "$candidate_config"
-  python3 - "$DB" "$candidate_db" "$candidate_config" \
+  python3 - "$DB" "$candidate_db" "$candidate_config" "$TRAFFIC_STATE" "$STATS_PORT" \
     "$action" "$name" "$kind" "$port" "$host" "$uuid" "$priv" "$pub" \
     "$sid" "$sni" "$dest" "$method" "$psk" <<'PY'
 import json,sys,os
-(db_path,new_db,new_conf,action,name,kind,port,host,uuid,priv,pub,sid,sni,dest,method,psk)=sys.argv[1:]
+(db_path,new_db,new_conf,traffic_path,stats_port,action,name,kind,port,host,uuid,priv,pub,sid,sni,dest,method,psk)=sys.argv[1:]
 with open(db_path,encoding='utf-8') as f:
     db=json.load(f)
 nodes=db['nodes']
@@ -389,11 +395,18 @@ elif action=='delete':
     if not any(n['name']==name for n in nodes): raise ValueError('找不到指定节点')
     db['nodes']=[n for n in nodes if n['name']!=name]
     nodes=db['nodes']
-elif action=='harden':
+elif action=='harden' or action=='sync':
     pass
+elif action=='quota':
+    selected=next((n for n in nodes if n['name']==name),None)
+    if selected is None: raise ValueError('找不到指定节点')
+    limit=int(port)
+    if limit<0: raise ValueError('流量上限不能为负数')
+    selected['quota_bytes']=limit
 else: raise ValueError('无效操作')
 import secrets
 for n in nodes:
+    n.setdefault('quota_id',secrets.token_hex(12))
     if n['kind']=='reality' and 'fallback_limit' not in n:
         # 对每个节点持久化不同的限速数值，避免统一参数形成固定特征。
         up=(24+secrets.randbelow(25))*1024
@@ -404,8 +417,20 @@ for n in nodes:
             'download':{'afterBytes':(32+secrets.randbelow(97))*1024,
                         'bytesPerSec':down,'burstBytesPerSec':down*2}
         }
-inbounds=[]
+# 流量状态文件独立于节点数据库，采样不引发每分钟重启。
+try:
+    with open(traffic_path,encoding='utf-8') as f: traffic=json.load(f).get('nodes',{})
+except (OSError,ValueError,TypeError):
+    traffic={}
+if any(n['port']==int(stats_port) for n in nodes):
+    raise ValueError('现有节点占用了内部统计端口 '+stats_port+'，请先调整该节点')
+inbounds=[{'tag':'xraymulti-stats-in','listen':'127.0.0.1',
+           'port':int(stats_port),'protocol':'dokodemo-door',
+           'settings':{'address':'127.0.0.1'}}]
 for n in nodes:
+    used=traffic.get(n['quota_id'],{}).get('uplink',0)+traffic.get(n['quota_id'],{}).get('downlink',0)
+    if n.get('quota_bytes',0)>0 and used>=n['quota_bytes']:
+        continue
     if n['kind']=='reality':
         inbounds.append({
             'tag':'reality-'+n['name'], 'listen':'0.0.0.0', 'port':n['port'],
@@ -441,11 +466,14 @@ for n in nodes:
     else:
         raise ValueError('未知节点类型: '+str(n['kind']))
 conf={'log':{'loglevel':'warning'},'inbounds':inbounds,
-      'outbounds':[{'protocol':'freedom','tag':'direct'}, {'protocol':'blackhole','tag':'block'}]}
+      'outbounds':[{'protocol':'freedom','tag':'direct'}, {'protocol':'blackhole','tag':'block'}],
+      'stats':{},
+      'policy':{'system':{'statsInboundUplink':True,'statsInboundDownlink':True}},
+      'api':{'tag':'xraymulti-stats','services':['StatsService']}}
 forward_tags=['forward-'+n['name'] for n in nodes if n['kind']=='forward']
-if forward_tags:
-    conf['routing']={'rules':[{'type':'field','inboundTag':[tag],
-                               'outboundTag':'direct'} for tag in forward_tags]}
+rules=[{'type':'field','inboundTag':['xraymulti-stats-in'],'outboundTag':'xraymulti-stats'}]
+rules.extend({'type':'field','inboundTag':[tag],'outboundTag':'direct'} for tag in forward_tags)
+conf['routing']={'rules':rules}
 for path,data in [(new_db,db),(new_conf,conf)]:
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
     with os.fdopen(fd,'w',encoding='utf-8') as f:
@@ -461,6 +489,10 @@ apply_candidate() {
   if ! "$BIN" run -test -format json -config "$staged_config"; then
     rm -f "$staged_db" "$staged_config"
     die 'Xray 配置校验失败：未修改原来的节点。'
+  fi
+  # 服务重启会清空内核计数，先落盘已观察到的流量。
+  if [[ -f "$CONFIG" ]] && grep -q '"xraymulti-stats"' "$CONFIG"; then
+    traffic_sample || warn '切换配置前无法采集流量；本次重启前未采集的字节可能丢失。'
   fi
   cp -p "$DB" "$old_db"
   cp -p "$CONFIG" "$old_config"
