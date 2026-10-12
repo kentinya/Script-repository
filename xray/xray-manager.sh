@@ -22,6 +22,11 @@ MANAGER_BIN='/usr/local/sbin/xray-multi-manager'
 CONFIG_LOCK_FD=''
 TRAFFIC_UNIT='/etc/systemd/system/xray-multi-traffic.service'
 TRAFFIC_TIMER='/etc/systemd/system/xray-multi-traffic.timer'
+GOST_DIR='/usr/local/lib/xray-multi'
+GOST_BIN="$GOST_DIR/gost"
+GOST_CONFIG="$CONF_DIR/gost-forward.json"
+GOST_UNIT='/etc/systemd/system/xray-multi-forward.service'
+GOST_SERVICE='xray-multi-forward.service'
 
 # 终端视觉风格参考 Gum：强调色、分组、状态提示；不依赖额外 TUI 程序。
 # 非交互环境、TERM=dumb、NO_COLOR 自动禁用 ANSI 控制符。
@@ -127,7 +132,7 @@ EOF_UI_BANNER
   ui_item '10' 'REALITY 回落限速加固'
   ui_item '17' '检测已有 REALITY 节点 SNI 可用性'
   ui_section '端口转发'
-  printf '  %s[11]%s  新增 TCP / UDP 转发        %s[12]%s  查看转发规则\n' \
+  printf '  %s[11]%s  新增 TCP / UDP 转发 (GOST) %s[12]%s  查看转发规则\n' \
     "$UI_ACCENT" "$UI_RESET" "$UI_ACCENT" "$UI_RESET"
   ui_item '13' '删除转发规则'
   ui_section '单节点流量'
@@ -149,27 +154,27 @@ check_root() {
 
 install_packages() {
   local missing=() p
-  for p in curl unzip openssl python3 qrencode ss flock; do
+  for p in curl unzip openssl python3 qrencode ss flock tar; do
     command -v "$p" >/dev/null 2>&1 || missing+=("$p")
   done
   ((${#missing[@]} == 0)) && return 0
   info "安装所需依赖：${missing[*]}"
   if command -v apt-get >/dev/null 2>&1; then
-    local packages=(curl unzip openssl python3 qrencode iproute2 util-linux)
+    local packages=(curl unzip openssl python3 qrencode iproute2 util-linux tar)
     DEBIAN_FRONTEND=noninteractive apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y curl unzip openssl python3 qrencode iproute util-linux
+    dnf install -y curl unzip openssl python3 qrencode iproute util-linux tar
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y curl unzip openssl python3 qrencode iproute util-linux
+    yum install -y curl unzip openssl python3 qrencode iproute util-linux tar
   elif command -v pacman >/dev/null 2>&1; then
-    pacman -Sy --noconfirm --needed curl unzip openssl python qrencode iproute2 util-linux
+    pacman -Sy --noconfirm --needed curl unzip openssl python qrencode iproute2 util-linux tar
   elif command -v zypper >/dev/null 2>&1; then
-    zypper --non-interactive install curl unzip openssl python3 qrencode iproute2 util-linux
+    zypper --non-interactive install curl unzip openssl python3 qrencode iproute2 util-linux tar
   else
     die '不支持当前发行版的软件包管理器，请手动安装 curl unzip openssl python3 qrencode iproute2。'
   fi
-  for p in curl unzip openssl python3 qrencode ss flock; do
+  for p in curl unzip openssl python3 qrencode ss flock tar; do
     command -v "$p" >/dev/null 2>&1 || die "依赖安装失败：$p"
   done
 }
@@ -183,6 +188,18 @@ arch_name() {
     armv6l) echo arm32-v6 ;;
     s390x|ppc64le|riscv64) uname -m ;;
     *) die "不支持的 CPU 架构：$(uname -m)" ;;
+  esac
+}
+
+gost_arch_name() {
+  case "$(uname -m)" in
+    x86_64|amd64) echo amd64 ;;
+    i386|i686) echo 386 ;;
+    aarch64|arm64) echo arm64 ;;
+    armv7l|armv7) echo armv7 ;;
+    armv6l|armv6) echo armv6 ;;
+    riscv64|s390x) uname -m ;;
+    *) die "GOST 暂不支持当前 CPU 架构：$(uname -m)" ;;
   esac
 }
 
@@ -232,6 +249,78 @@ WantedBy=multi-user.target
 EOF
   chmod 644 "$UNIT"
   systemctl daemon-reload
+}
+
+write_gost_unit() {
+  cat >"$GOST_UNIT" <<EOF_GOST_UNIT
+[Unit]
+Description=Xray Multi GOST Port Forwarding
+Documentation=https://github.com/go-gost/gost
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=$RUN_USER
+Group=$RUN_USER
+ExecStart=$GOST_BIN -C $GOST_CONFIG
+Restart=on-failure
+RestartSec=2
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+EOF_GOST_UNIT
+  chmod 644 "$GOST_UNIT"
+  systemctl daemon-reload
+}
+
+install_gost() {
+  install_packages
+  local arch latest version asset base temp expected actual
+  arch="$(gost_arch_name)"
+  latest="$(curl -fsSL --retry 3 --connect-timeout 15 --max-time 40 \
+    https://api.github.com/repos/go-gost/gost/releases/latest \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["tag_name"])')" \
+    || die '获取 GOST 最新版本失败。'
+  [[ "$latest" =~ ^v3\.[0-9]+\.[0-9]+([-.+][0-9A-Za-z.-]+)?$ ]] || die "异常 GOST 版本号：$latest"
+  version="${latest#v}"
+  asset="gost_${version}_linux_${arch}.tar.gz"
+  base="https://github.com/go-gost/gost/releases/download/${latest}"
+  temp="$(mktemp -d)"
+  curl -fLsS --retry 3 --connect-timeout 15 --max-time 240 -o "$temp/gost.tar.gz" "$base/$asset" \
+    || { rm -rf -- "$temp"; die '下载 GOST 失败。'; }
+  curl -fLsS --retry 3 --connect-timeout 15 --max-time 40 -o "$temp/checksums.txt" "$base/checksums.txt" \
+    || { rm -rf -- "$temp"; die '下载 GOST 校验文件失败。'; }
+  expected="$(python3 - "$temp/checksums.txt" "$asset" <<'PY_GOST_SUM'
+import re,sys
+text=open(sys.argv[1],encoding='utf-8',errors='replace').read().splitlines()
+asset=sys.argv[2]
+for line in text:
+    if asset in line:
+        m=re.search(r'(?i)\b([0-9a-f]{64})\b',line)
+        if m:
+            print(m.group(1).lower())
+            break
+PY_GOST_SUM
+)"
+  [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || { rm -rf -- "$temp"; die '无法读取 GOST SHA256 校验值。'; }
+  actual="$(sha256sum "$temp/gost.tar.gz" | awk '{print $1}')"
+  [[ "$expected" == "$actual" ]] || { rm -rf -- "$temp"; die 'GOST 安装包 SHA256 校验失败！'; }
+  tar -xzf "$temp/gost.tar.gz" -C "$temp" || { rm -rf -- "$temp"; die '解压 GOST 失败。'; }
+  [[ -x "$temp/gost" ]] || { rm -rf -- "$temp"; die 'GOST 安装包中未找到可执行文件。'; }
+  "$temp/gost" -V >/dev/null 2>&1 || { rm -rf -- "$temp"; die 'GOST 无法在本机运行。'; }
+  install -d -m 755 -o root -g root "$GOST_DIR"
+  install -m 755 "$temp/gost" "$GOST_BIN"
+  rm -rf -- "$temp"
+  write_gost_unit
+  info "GOST ${latest} 已安装到 $GOST_BIN。"
 }
 
 install_xray() {
@@ -290,6 +379,19 @@ PY
     die '服务启动失败，请执行 journalctl -u xray-multi -n 50 查看原因。'
   fi
   if [[ -f "$TRAFFIC_TIMER" ]]; then setup_traffic_monitor; fi
+  if python3 - "$DB" <<'PY_HAS_FORWARD'
+import json,sys
+with open(sys.argv[1],encoding='utf-8') as f:
+    rules=[n for n in json.load(f).get('nodes',[]) if n.get('kind')=='forward']
+sys.exit(0 if rules else 1)
+PY_HAS_FORWARD
+  then
+    install_gost
+    make_candidate sync ''
+    apply_candidate || die '迁移旧转发规则时生成 Xray 配置失败。'
+    sync_gost_forwarding || die '迁移旧转发规则到 GOST 失败。'
+    info '已有端口转发规则已从 Xray 迁移到独立 GOST 服务。'
+  fi
   info "Xray ${latest} 已安装/更新，服务 ${SERVICE} 运行中。"
   rm -rf -- "$temp"
   trap - EXIT
@@ -471,17 +573,8 @@ for n in nodes:
             }
         })
     elif n['kind']=='forward':
-        inbounds.append({
-            'tag':'forward-'+n['name'], 'listen':n['host'], 'port':n['port'],
-            'protocol':'tunnel',
-            'settings':{
-                'allowedNetwork':n['network'],
-                'rewriteAddress':n['target_host'],
-                'rewritePort':n['target_port'],
-                'followRedirect':False
-            },
-            'sniffing':{'enabled':False}
-        })
+        # 端口转发由独立 GOST 服务负责。
+        continue
     else:
         raise ValueError('未知节点类型: '+str(n['kind']))
 conf={'log':{'loglevel':'warning'},'inbounds':inbounds,
@@ -489,9 +582,7 @@ conf={'log':{'loglevel':'warning'},'inbounds':inbounds,
       'stats':{},
       'policy':{'system':{'statsInboundUplink':True,'statsInboundDownlink':True}},
       'api':{'tag':'xraymulti-stats','services':['StatsService']}}
-forward_tags=['forward-'+n['name'] for n in nodes if n['kind']=='forward']
 rules=[{'type':'field','inboundTag':['xraymulti-stats-in'],'outboundTag':'xraymulti-stats'}]
-rules.extend({'type':'field','inboundTag':[tag],'outboundTag':'direct'} for tag in forward_tags)
 conf['routing']={'rules':rules}
 for path,data in [(new_db,db),(new_conf,conf)]:
     fd=os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
@@ -540,7 +631,8 @@ traffic_db() {
   python3 - "$DB" "$TRAFFIC_STATE" "$BIN" "$STATS_PORT" "$SERVICE" "$1" "$2" <<'PY_TRAFFIC'
 import fcntl,json,os,subprocess,sys,tempfile,time
 db_path,path,xray,port,service,action,name=sys.argv[1:]
-with open(db_path,encoding='utf-8') as f: nodes=json.load(f).get('nodes',[])
+with open(db_path,encoding='utf-8') as f:
+    nodes=[n for n in json.load(f).get('nodes',[]) if n.get('kind')!='forward']
 os.makedirs(os.path.dirname(path),exist_ok=True)
 def run(argv):
     return subprocess.run(argv,check=True,capture_output=True,text=True,timeout=8).stdout.strip()
@@ -1192,7 +1284,62 @@ add_ss() {
 }
 
 
-# 转发入口由 Xray tunnel 实现，独立规则复用现有数据库及配置回滚。
+# 转发入口由独立 GOST v3 服务实现；规则仍复用现有数据库。
+sync_gost_forwarding() {
+  local tmp="$CONF_DIR/.gost-forward.pending.json" count
+  count="$(python3 - "$DB" "$tmp" <<'PY_GOST_CONFIG'
+import ipaddress,json,os,sys
+db_path,out=sys.argv[1:]
+with open(db_path,encoding='utf-8') as f:
+    nodes=json.load(f).get('nodes',[])
+services=[]
+def addr(host,port):
+    try:
+        if ipaddress.ip_address(host).version==6:
+            host='['+host+']'
+    except ValueError:
+        pass
+    return f"{host}:{int(port)}"
+for n in nodes:
+    if n.get('kind')!='forward':
+        continue
+    protocols=[p.strip() for p in n.get('network','tcp').split(',') if p.strip()]
+    for proto in protocols:
+        if proto not in ('tcp','udp'):
+            raise SystemExit('无效 GOST 转发协议: '+proto)
+        services.append({
+            'name':f"forward-{n['name']}-{proto}",
+            'addr':addr(n.get('host','0.0.0.0'),n['port']),
+            'handler':{'type':proto},
+            'listener':{'type':proto},
+            'forwarder':{'nodes':[{'name':f"target-{n['name']}",'addr':addr(n['target_host'],n['target_port'])}]}
+        })
+data={'services':services}
+fd=os.open(out,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+with os.fdopen(fd,'w',encoding='utf-8') as f:
+    json.dump(data,f,ensure_ascii=False,indent=2)
+    f.write('\n')
+print(len(services))
+PY_GOST_CONFIG
+)" || { rm -f "$tmp"; return 1; }
+  if ((count == 0)); then
+    rm -f "$tmp" "$GOST_CONFIG"
+    systemctl disable --now "$GOST_SERVICE" >/dev/null 2>&1 || true
+    return 0
+  fi
+  [[ -x "$GOST_BIN" ]] || install_gost
+  "$GOST_BIN" -C "$tmp" -O json >/dev/null 2>&1 || { rm -f "$tmp"; warn 'GOST 配置校验失败。'; return 1; }
+  chown root:"$RUN_USER" "$tmp"
+  chmod 640 "$tmp"
+  mv -f "$tmp" "$GOST_CONFIG"
+  write_gost_unit
+  systemctl enable "$GOST_SERVICE" >/dev/null || return 1
+  systemctl restart "$GOST_SERVICE" || return 1
+  sleep 1
+  systemctl is-active --quiet "$GOST_SERVICE" || return 1
+  return 0
+}
+
 forward_exists() {
   [[ -f "$DB" ]] || return 1
   python3 - "$DB" "$1" <<'PY_FORWARD_EXISTS'
@@ -1228,7 +1375,8 @@ PY_FORWARD_LIST
 
 add_forward() {
   require_installed
-  say '新增 A → B 端口转发'
+  [[ -x "$GOST_BIN" ]] || install_gost
+  say '新增 A → B 端口转发（GOST）'
   local name listen port target target_port choice network
   ask name '规则名称（字母、数字、下划线、短横线）' ''
   valid_name "$name" || die '规则名称不合法。'
@@ -1270,7 +1418,14 @@ PY_FORWARD_LISTEN
   fi
   make_candidate add "$name" forward "$port" "$listen" '' '' '' '' '' "$target" "$network" "$target_port"
   apply_candidate || die '转发创建失败，旧配置已恢复。'
-  info "转发已启用：$listen:$port → $target:$target_port [$network]"
+  if ! sync_gost_forwarding; then
+    warn 'GOST 服务启动失败，正在撤销刚创建的转发规则。'
+    make_candidate delete "$name"
+    apply_candidate || true
+    sync_gost_forwarding || true
+    die '转发创建失败；规则已撤销。'
+  fi
+  info "GOST 转发已启用：$listen:$port → $target:$target_port [$network]"
   warn '请确保 A 的防火墙 / 云安全组放行监听端口，B 允许来自 A 的连接。'
 }
 
@@ -1285,6 +1440,7 @@ delete_forward() {
   [[ "$confirm" == YES ]] || { info '已取消。'; return; }
   make_candidate delete "$name"
   apply_candidate || die '删除转发失败，旧配置已恢复。'
+  sync_gost_forwarding || die '规则已删除，但 GOST 服务同步失败，请执行 forward-list 后检查服务状态。'
   info "转发规则 $name 已删除。"
 }
 
@@ -1376,15 +1532,23 @@ harden_reality() {
 restart_managed_service() {
   require_installed
   traffic_sample || warn '重启前无法获取最新流量数据。'
-  systemctl restart "$SERVICE" && info '服务已重启。'
+  systemctl restart "$SERVICE" || die 'Xray 服务重启失败。'
+  if systemctl is-enabled --quiet "$GOST_SERVICE" 2>/dev/null; then
+    systemctl restart "$GOST_SERVICE" || die 'GOST 转发服务重启失败。'
+  fi
+  info 'Xray / GOST 托管服务已重启。'
 }
 
 status() {
   if [[ -x "$BIN" ]]; then "$BIN" version | head -n 1; else warn '尚未安装 Xray。'; fi
+  if [[ -x "$GOST_BIN" ]]; then "$GOST_BIN" -V 2>/dev/null | head -n 1 || true; fi
   if [[ -f "$UNIT" ]]; then
     systemctl --no-pager --full status "$SERVICE" || true
   else
-    warn '服务尚未安装。'
+    warn 'Xray 服务尚未安装。'
+  fi
+  if [[ -f "$GOST_UNIT" ]]; then
+    systemctl --no-pager --full status "$GOST_SERVICE" || true
   fi
   node_names
   forward_list
@@ -1397,7 +1561,8 @@ uninstall_all() {
   ask confirm '确认卸载请输入 REMOVE' ''
   [[ "$confirm" == REMOVE ]] || { info '已取消。'; return; }
   systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true
-  rm -f "$UNIT"
+  systemctl disable --now "$GOST_SERVICE" >/dev/null 2>&1 || true
+  rm -f "$UNIT" "$GOST_UNIT"
   systemctl daemon-reload
   if [[ -f "$MARKER" ]]; then
     # 注意：本工具只清理它安装标记下的二进制文件；其他 xray.service 可能依赖它。
@@ -1414,7 +1579,7 @@ uninstall_all() {
   systemctl disable --now xray-multi-traffic.timer >/dev/null 2>&1 || true
   rm -f "$TRAFFIC_UNIT" "$TRAFFIC_TIMER" "$MANAGER_BIN" "$MANAGER_BIN.new"
   systemctl daemon-reload
-  rm -rf -- "$CONF_DIR" "$DATA_DIR"
+  rm -rf -- "$CONF_DIR" "$DATA_DIR" "$GOST_DIR"
   info '已删除本工具的服务和所有管理数据。'
 }
 
@@ -1435,7 +1600,7 @@ Xray 多配置管理器 v1.5（需要 root，Linux + systemd）
   status          查看服务状态 / 所有节点
   restart         重启服务
   harden          给已有 REALITY 节点加回落限速（不更换 SNI）
-  forward-add     新增 A IP:端口 → B IP:端口 转发（TCP / UDP）
+  forward-add     新增 GOST A IP:端口 → B IP:端口 转发（TCP / UDP）
   forward-list    查看全部转发规则
   forward-delete  删除指定转发规则
   quota-list      查看每个节点累计流量、配额和停用状态
@@ -1451,6 +1616,8 @@ Xray 多配置管理器 v1.5（需要 root，Linux + systemd）
   /var/lib/xray-multi/qrcodes/         二维码（root 专用）
   /var/lib/xray-multi/traffic.json     累计流量（root 专用）
   /etc/systemd/system/xray-multi.service
+  /etc/xray-multi/gost-forward.json      GOST 独立转发配置
+  /etc/systemd/system/xray-multi-forward.service
 
 提示：
   1. 防火墙和云平台安全组请自行放行节点端口；SS2022 同时需要 TCP/UDP。
@@ -1467,14 +1634,14 @@ Xray 多配置管理器 v1.5（需要 root，Linux + systemd）
      请留意同一目标可被大量并发回落连接滥用，仍需主机流量监控。
   4. 仅管理本工具创建的节点，不迁移系统已有 /usr/local/etc/xray 配置。
   5. 使用独立 systemd 服务 xray-multi，不接管已有 xray.service。
-  6. 单节点流量限制基于 Xray StatsService 入站统计，上下行字节相加；可用于代理节点及转发规则。
+  6. 单节点流量限制基于 Xray StatsService 入站统计，上下行字节相加；仅用于 Xray 代理节点。
      首次设置额度后安装每分钟运行的 systemd 定时器（xray-multi-traffic.timer）。
      超额时从 Xray 的有效配置中停用对应节点，重置用量或调高额度可恢复。
      这是分钟级配额，并非实时硬限速；峰值流量和非正常重启可能造成超额/漏计。
      启停限额会重启 Xray，其他节点继续存在，但当前连接可能短暂中断。
      仅统计 Xray 入站流量，不包含协议栈及运营商计费额外开销。
   7. 端口转发规则和节点统一保存 /var/lib/xray-multi/nodes.json，支持失败回滚。
-     转发不是加密隧道；公网监听应在防火墙限制来源 IP，防止刷流量。
+     转发由独立 xray-multi-forward.service（GOST v3）运行，不再写入 Xray inbounds。\n     GOST 转发不是加密隧道；公网监听应在防火墙限制来源 IP，防止刷流量。
      B 服务器通常看到 A 的出口 IP，而不是原始客户端 IP。
 EOF
 }
