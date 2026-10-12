@@ -1,4 +1,4 @@
-# Xray Multi 多节点管理器使用说明（v1.5）
+# Xray Multi 多节点管理器使用说明（v1.6）
 
 > 适用脚本：[xray-manager.sh](./xray-manager.sh)｜仓库首页：[README](../README.md)
 >
