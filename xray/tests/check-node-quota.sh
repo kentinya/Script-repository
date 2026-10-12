@@ -40,12 +40,13 @@ import json,sys
 c=json.load(open(sys.argv[1]))
 tags={n['tag'] for n in c['inbounds']}
 assert 'ss2022-alpha' not in tags, tags
-assert {'ss2022-beta','forward-relay','xraymulti-stats-in'} <= tags
+assert {'ss2022-beta','xraymulti-stats-in'} <= tags
+assert 'forward-relay' not in tags, tags
 assert c['policy']['system']['statsInboundUplink'] is True
 assert c['policy']['system']['statsInboundDownlink'] is True
 assert c['api']['services']==['StatsService']
 assert c['routing']['rules'][0]['outboundTag']=='xraymulti-stats'
-print('Quota-exceeded node disabled, other nodes remain active')
+print('Quota-exceeded Xray node disabled; GOST forward is excluded from Xray inbounds')
 PY
 release_config_lock
 
