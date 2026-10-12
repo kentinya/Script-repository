@@ -903,7 +903,7 @@ try:
         # DNS/证书验证通过，地理不符合只提示，不影响手动模式。
         print(sni)
     elif mode=='random':
-        builtin=['www.microsoft.com','www.apple.com','www.samsung.com',
+        builtin=['dl.google.com','www.apple.com','www.samsung.com',
                  'www.ibm.com','www.adobe.com','www.oracle.com',
                  'www.amazon.com','www.bing.com','github.com',
                  'www.mozilla.org','www.python.org','www.ubuntu.com',
@@ -931,8 +931,7 @@ try:
         # 有地区标注的候选优先测试，实际定位仍由解析 IP 决定。
         if server and server.get('country'):
             choices.sort(key=lambda t:t[0]!=server['country'])
-        best_rank=-1
-        best=[]
+        ranked=[]
         checked=0
         for hint,host in choices[:20]:
             checked+=1
@@ -943,25 +942,23 @@ try:
                     log('%s 已排除：Cloudflare ASN 13335。' % host)
                     continue
                 rank,kind=score(data,hint)
-                if rank>best_rank:
-                    best_rank=rank
-                    best=[(host,ip,kind,data)]
-                elif rank==best_rank:
-                    best.append((host,ip,kind,data))
-                if rank==4 and len(best)>=2:
-                    break
+                ranked.append((rank,host,ip,kind,data))
             except (OSError,ValueError) as e:
                 log('%s 已跳过：%s' % (host,str(e)[:95]))
-        if not best:
+        if not ranked:
             raise ValueError('无法找到非 Cloudflare 且支持 TLS 1.3/h2 的目标；请换目标池或手动指定')
-        selected=random.SystemRandom().choice(best)
-        host,ip,kind,data=selected
-        log('从 %d 个候选中选中 %s (%s)，目标 IP %s、国家/地区 %s、ASN %s。' % (
-            checked,host,kind,ip,(data or {}).get('country','未知'),
-            (data or {}).get('asn','未知')))
-        if best_rank<2:
+        random.SystemRandom().shuffle(ranked)
+        ranked.sort(key=lambda candidate:candidate[0],reverse=True)
+        shortlisted=ranked[:6]
+        log('TLS 初筛 %d 个目标，将对 %d 个候选进行真实 REALITY 连接测试。' % (
+            checked,len(shortlisted)))
+        if shortlisted[0][0]<2:
             log('警告：没有找到可验证的同国/同洲目标；建议在候选池中补充当地网站。')
-        print(host)
+        for rank,host,ip,kind,data in shortlisted:
+            log('REALITY 待测：%s (%s)，IP %s、国家/地区 %s、ASN %s。' % (
+                host,kind,ip,(data or {}).get('country','未知'),
+                (data or {}).get('asn','未知')))
+            print(host)
     else:
         raise ValueError('未知目标检测模式')
 except (OSError,ValueError) as e:
@@ -976,19 +973,130 @@ random_reality_sni() {
   reality_target_probe random "$1"
 }
 
+# 普通 TLS 1.3/h2 检测不足以保证 REALITY 握手兼容（例如目标证书记录过大）。
+# 临时 Xray 仅监听 127.0.0.1，经 SOCKS5 和 REALITY 完成两次数据往返，不修改线上服务。
+reality_smoke_test() {
+  python3 - "$BIN" "$1" "$2" <<'PY_REALITY_SMOKE'
+import json,os,re,socket,subprocess,sys,tempfile,threading,time,uuid
+
+def readn(sock,n):
+    data=b''
+    while len(data)<n:
+        piece=sock.recv(n-len(data))
+        if not piece: raise OSError('SOCKS 连接提前关闭')
+        data+=piece
+    return data
+
+def freeport():
+    with socket.socket() as s:
+        s.bind(('127.0.0.1',0))
+        return s.getsockname()[1]
+
+def check(binary,sni,dest):
+    output=subprocess.run([binary,'x25519'],capture_output=True,text=True,check=True,timeout=8).stdout
+    pairs={re.sub('[^a-z]','',k.lower()):v.strip().split()[0] for line in output.splitlines()
+           if ':' in line for k,v in [line.split(':',1)] if v.strip()}
+    priv=pairs.get('privatekey','')
+    pub=next((v for k,v in pairs.items() if k.startswith(('publickey','password'))),'')
+    if not priv or not pub: raise ValueError('无法生成临时 REALITY 密钥')
+    rp,sp=freeport(),freeport()
+    with socket.socket() as echo:
+        echo.bind(('127.0.0.1',0)); echo.listen(2); ep=echo.getsockname()[1]
+        done=threading.Event()
+        def serve():
+            echo.settimeout(.2)
+            while not done.is_set():
+                try: conn,_=echo.accept()
+                except socket.timeout: continue
+                except OSError: break
+                with conn:
+                    conn.settimeout(6)
+                    try:
+                        data=conn.recv(100)
+                        if data: conn.sendall(data)
+                    except OSError: pass
+        threading.Thread(target=serve,daemon=True).start()
+        uid=str(uuid.uuid4()); sid=os.urandom(8).hex()
+        cfg={'log':{'loglevel':'warning'},'inbounds':[
+            {'tag':'socks','listen':'127.0.0.1','port':sp,'protocol':'socks','settings':{'auth':'noauth'}},
+            {'tag':'reality','listen':'127.0.0.1','port':rp,'protocol':'vless',
+             'settings':{'clients':[{'id':uid,'flow':'xtls-rprx-vision'}],'decryption':'none'},
+             'streamSettings':{'network':'tcp','security':'reality','realitySettings':{
+                 'target':dest,'serverNames':[sni],'privateKey':priv,'shortIds':[sid]}}}],
+             'outbounds':[
+            {'tag':'client','protocol':'vless',
+             'settings':{'vnext':[{'address':'127.0.0.1','port':rp,
+                                   'users':[{'id':uid,'encryption':'none','flow':'xtls-rprx-vision'}]}]},
+             'streamSettings':{'network':'tcp','security':'reality','realitySettings':{
+                 'serverName':sni,'fingerprint':'chrome','publicKey':pub,'shortId':sid}}},
+            {'tag':'direct','protocol':'freedom'}],
+            'routing':{'rules':[{'type':'field','inboundTag':['socks'],'outboundTag':'client'},
+                                {'type':'field','inboundTag':['reality'],'outboundTag':'direct'}]}}
+        try:
+            with tempfile.TemporaryDirectory(prefix='xray-reality-check-') as tmp:
+                path=os.path.join(tmp,'config.json')
+                with open(path,'w') as f: json.dump(cfg,f)
+                os.chmod(path,0o600)
+                with open(os.path.join(tmp,'xray.log'),'wb') as log:
+                    proc=subprocess.Popen([binary,'run','-format','json','-config',path],
+                                          stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT)
+                    try:
+                        for _ in range(40):
+                            if proc.poll() is not None: raise ValueError('临时 Xray 启动失败')
+                            try:
+                                with socket.create_connection(('127.0.0.1',sp),timeout=.3): break
+                            except OSError: time.sleep(.1)
+                        else: raise ValueError('临时 Xray 启动超时')
+                        for _ in range(2):
+                            with socket.create_connection(('127.0.0.1',sp),timeout=5) as sock:
+                                sock.settimeout(6); sock.sendall(b'\x05\x01\x00')
+                                if readn(sock,2)!=b'\x05\x00': raise ValueError('SOCKS 方法失败')
+                                sock.sendall(b'\x05\x01\x00\x01\x7f\x00\x00\x01'+ep.to_bytes(2,'big'))
+                                hdr=readn(sock,4)
+                                if hdr[:2]!=b'\x05\x00': raise ValueError('REALITY 链路失败 (SOCKS %d)'%hdr[1])
+                                if hdr[3]==1: readn(sock,6)
+                                elif hdr[3]==3: readn(sock,readn(sock,1)[0]+2)
+                                elif hdr[3]==4: readn(sock,18)
+                                else: raise ValueError('SOCKS 地址类型不合法')
+                                data=os.urandom(16); sock.sendall(data)
+                                if readn(sock,len(data))!=data: raise ValueError('REALITY 数据往返不一致')
+                    finally:
+                        if proc.poll() is None: proc.terminate()
+                        try: proc.wait(timeout=2)
+                        except subprocess.TimeoutExpired: proc.kill(); proc.wait(timeout=2)
+        finally: done.set()
+
+try: check(*sys.argv[1:4])
+except (OSError,ValueError,subprocess.SubprocessError) as exc:
+    print('[REALITY 自检] '+str(exc)[:170],file=sys.stderr)
+    sys.exit(1)
+PY_REALITY_SMOKE
+}
+
 add_reality() {
   require_installed
   say '新增 VLESS + Vision + REALITY 节点'
   ask_base 443
-  local sni dest raw priv pub uuid sid dest_host dest_port server_ip was_random=0
+  local sni dest raw priv pub uuid sid dest_host dest_port server_ip was_random=0 candidates candidate
   server_ip="$(public_address)"
   ask sni 'REALITY 伪装目标 SNI（输入 random 随机选择，或手动填写域名）' 'random'
   case "${sni,,}" in
     random|r)
-      info '随机检测支持 TLS 1.3 + HTTP/2 (h2) 的 SNI 目标……'
+      info '随机初筛 TLS 1.3 + HTTP/2 (h2) 和 Cloudflare 目标，然后实测 REALITY 连接……'
       was_random=1
-      sni="$(random_reality_sni "$server_ip")" || die '自动选择 REALITY SNI 失败。'
-      info "本次随机选中 SNI：$sni"
+      candidates="$(random_reality_sni "$server_ip")" || die '自动选择 REALITY SNI 失败。'
+      sni=''
+      while IFS= read -r candidate; do
+        [[ -n "$candidate" ]] || continue
+        info "尝试 REALITY 全链路连接：$candidate"
+        if reality_smoke_test "$candidate" "$candidate:443"; then
+          sni="$candidate"
+          break
+        fi
+        warn "目标 $candidate 在 REALITY 实测失败，尝试下一个候选。"
+      done <<<"$candidates"
+      [[ -n "$sni" ]] || die '候选站点均未通过 REALITY 实测，未修改任何节点。请调整 SNI 候选池或排查网络。'
+      info "通过 REALITY 实测的 SNI：$sni"
       ;;
     *) valid_sni "$sni" || die 'SNI 必须是有效域名。' ;;
   esac
@@ -1005,6 +1113,8 @@ add_reality() {
     info '检测指定的目标是否支持 TLS 1.3/h2，以及是否使用 Cloudflare……'
     reality_target_probe verify "$server_ip" "$sni" "$dest_host" "$dest_port" >/dev/null \
       || die '该 REALITY 目标不可用或不安全，已阻止创建节点。'
+    info '正在用临时本机 Xray 验证所选 SNI 和目标地址的真实 REALITY 握手……'
+    reality_smoke_test "$sni" "$dest"       || die '该目标虽然可能支持 HTTPS，但 REALITY 实测失败；未修改原节点。'
   fi
   raw="$("$BIN" x25519)" || die 'REALITY 密钥生成失败。'
   read -r priv pub < <(python3 - "$raw" <<'PY'
@@ -1317,6 +1427,9 @@ Xray 多配置管理器 v1.5（需要 root，Linux + systemd）
      默认排除 Cloudflare IP/ASN，对人工目标也做 TLS + Cloudflare 检测。
      可选：编辑 /etc/xray-multi/reality-targets.txt，每行一个域名；也可写 DE www.example.de。
      可选：XRAY_GEO_COUNTRY=DE sudo -E bash xray-manager.sh add-reality 强制机房国家代码。
+     新建 REALITY 节点先做 TLS 初筛，再使用临时本机 Xray 完成两次 REALITY 数据往返。
+     无法通过实测的随机候选会被跳过；此检测只监听 127.0.0.1，不影响线上服务。
+     通过检测不保证公网入站、客户端兼容或未来目标 DNS 变化。
      IP 地理定位不保证精确；目标 CDN 解析和路由可能随时间变化。
   3. 新建节点默认对 REALITY 认证失败的回落连接设置随机化限速（非总带宽上限）。
      对旧节点执行 harden 启用限速，但它不会自动替换旧 SNI。

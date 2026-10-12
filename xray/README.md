@@ -89,7 +89,10 @@ bash xray-manager.sh help
 - 根据 VPS 的公网出口 IP 查询 ASN、国家/地区、大洲，并优先选择较接近的候选目标；地理定位不是精确保证。
 - 候选域名需要通过 DNS、TLS 1.3、HTTP/2（h2）等检查。
 - 对 DNS 解析到的 Cloudflare 已知 IP 网段及识别到的 Cloudflare ASN 13335 做排除；无法保证未来 DNS、CDN、Anycast 或流量风险完全不变。
-- 无法找到合适目标时会报错，**不会默默使用不符合检测要求的目标**。手动 SNI 也会接受目标检测。
+- TLS/DNS 初筛之后，**对优先候选依次执行真实 Xray VLESS + REALITY + Vision 本机连接自检**：仅监听 `127.0.0.1`，通过 SOCKS5 连续两次往返本机测试数据。失败自动尝试下一个候选（最多 6 个），全部失败则不创建节点，原有节点不变。
+- 手动 SNI 或修改 REALITY 目标地址时也会执行相同的真实连接检测，有助于排除普通 HTTPS 正常而 REALITY 握手失败的目标。
+- 默认随机候选池已移除曾在部分版本/地区触发 REALITY 握手问题的 `www.microsoft.com`，详见 [Xray-core #6356](https://github.com/XTLS/Xray-core/issues/6356)。
+- 临时实例不修改当前 Xray 服务，但会进行少量对外 TLS 流量；**通过本机测试仍无法保证公网线路、其他客户端版本、未来 DNS 或目标站点一直可用**。
 - 可以按需要建立 `/etc/xray-multi/reality-targets.txt`：每行一个域名，也可以在前面注明两字母国家代码，`#` 为注释。例如：
 
 ~~~text
@@ -105,7 +108,7 @@ www.example.org
 XRAY_GEO_COUNTRY=DE sudo -E bash xray-manager.sh add-reality
 ~~~
 
-> **TLS 目标检测说明**：脚本现在使用正确的 `TLSv1.3` 判断，并要求目标协商 HTTP/2（h2）。如果仍然失败，通常需要排查 DNS、出站 443 连接、证书有效性、目标 TLS/ALPN 能力及 Cloudflare 目标排除机制。
+> **REALITY 目标检测说明**：先通过 TLS 1.3/h2 检测，再通过真实 Xray REALITY 握手及本机数据往返检测。如果仍失败，检查服务器 DNS、出站 443、目标证书兼容性，以及 Cloudflare IP/ASN 排除。
 
 **防滥用建议**：不要把 Cloudflare 排除当成“不会被刷流量”的保证。限制公网暴露、监测出站流量，并在云平台配置告警或硬性流量控制。`10` 或 `harden` 只针对未认证回落连接设置限速，不限制正常节点带宽，也不能防止所有滥用。
 
@@ -218,7 +221,7 @@ sudo ss -lntup
 
 **配置校验失败**：脚本会先测试候选 JSON，失败时保留原有节点配置。可查看终端中的 Xray 错误输出；不要通过手动覆盖在线 `config.json` 来绕过校验。
 
-**REALITY 随机 SNI 报错**：检查 DNS、VPS 出站 443、伪装目标对 TLS 1.3/h2 的支持，以及伪装目标是否被 Cloudflare 网段检测排除。使用自定义域名时，需要是实际可达且受支持的 HTTPS 站点。
+**REALITY 随机 SNI 报错**：普通 TLS 能连接并不保证 REALITY 一定能使用；脚本现在会跳过本机 REALITY 实测失败的候选。请检查 DNS、VPS 出站 443、TLS 1.3/h2、证书兼容性与 Cloudflare 排除。使用自定义域名时，需要是实际可达且受支持的 HTTPS 站点。
 
 **流量统计不更新**：先查看 Xray 服务及定时器运行情况：
 
