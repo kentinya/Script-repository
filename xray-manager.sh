@@ -19,6 +19,7 @@ MARKER="$DATA_DIR/installed-by-xray-multi"
 TRAFFIC_STATE="$DATA_DIR/traffic.json"
 STATS_PORT=18785
 MANAGER_BIN='/usr/local/sbin/xray-multi-manager'
+CONFIG_LOCK_FD=''
 TRAFFIC_UNIT='/etc/systemd/system/xray-multi-traffic.service'
 TRAFFIC_TIMER='/etc/systemd/system/xray-multi-traffic.timer'
 
@@ -147,27 +148,27 @@ check_root() {
 
 install_packages() {
   local missing=() p
-  for p in curl unzip openssl python3 qrencode ss; do
+  for p in curl unzip openssl python3 qrencode ss flock; do
     command -v "$p" >/dev/null 2>&1 || missing+=("$p")
   done
   ((${#missing[@]} == 0)) && return 0
   info "安装所需依赖：${missing[*]}"
   if command -v apt-get >/dev/null 2>&1; then
-    local packages=(curl unzip openssl python3 qrencode iproute2)
+    local packages=(curl unzip openssl python3 qrencode iproute2 util-linux)
     DEBIAN_FRONTEND=noninteractive apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${packages[@]}"
   elif command -v dnf >/dev/null 2>&1; then
-    dnf install -y curl unzip openssl python3 qrencode iproute
+    dnf install -y curl unzip openssl python3 qrencode iproute util-linux
   elif command -v yum >/dev/null 2>&1; then
-    yum install -y curl unzip openssl python3 qrencode iproute
+    yum install -y curl unzip openssl python3 qrencode iproute util-linux
   elif command -v pacman >/dev/null 2>&1; then
-    pacman -Sy --noconfirm --needed curl unzip openssl python qrencode iproute2
+    pacman -Sy --noconfirm --needed curl unzip openssl python qrencode iproute2 util-linux
   elif command -v zypper >/dev/null 2>&1; then
-    zypper --non-interactive install curl unzip openssl python3 qrencode iproute2
+    zypper --non-interactive install curl unzip openssl python3 qrencode iproute2 util-linux
   else
     die '不支持当前发行版的软件包管理器，请手动安装 curl unzip openssl python3 qrencode iproute2。'
   fi
-  for p in curl unzip openssl python3 qrencode ss; do
+  for p in curl unzip openssl python3 qrencode ss flock; do
     command -v "$p" >/dev/null 2>&1 || die "依赖安装失败：$p"
   done
 }
@@ -368,12 +369,21 @@ ask_base() {
   valid_host "$NODE_HOST" || die '无效 IP 或域名。'
 }
 
+# 配置变更从生成候选到服务切换使用同一把锁，防止菜单与定时器冲突。
+release_config_lock() {
+  if [[ -n "$CONFIG_LOCK_FD" ]]; then
+    exec {CONFIG_LOCK_FD}>&-
+    CONFIG_LOCK_FD=''
+  fi
+}
 # 生成变更候选数据及 Xray 整体配置，不直接覆盖线上文件。
 make_candidate() {
   local action="$1" name="$2" kind="${3:-}" port="${4:-}" host="${5:-}" \
         uuid="${6:-}" priv="${7:-}" pub="${8:-}" sid="${9:-}" \
         sni="${10:-}" dest="${11:-}" method="${12:-}" psk="${13:-}"
   local candidate_db="$DATA_DIR/.nodes.pending.json" candidate_config="$CONF_DIR/.config.pending.json"
+  exec {CONFIG_LOCK_FD}>"$DATA_DIR/.config-operation.lock"
+  flock -x "$CONFIG_LOCK_FD" || die '无法取得配置修改锁'
   rm -f "$candidate_db" "$candidate_config"
   python3 - "$DB" "$candidate_db" "$candidate_config" "$TRAFFIC_STATE" "$STATS_PORT" \
     "$action" "$name" "$kind" "$port" "$host" "$uuid" "$priv" "$pub" \
@@ -515,9 +525,11 @@ apply_candidate() {
     cp -p "$old_config" "$CONFIG"
     systemctl restart "$SERVICE" || warn '旧服务恢复也失败，请检查系统日志。'
     rm -f "$old_db" "$old_config"
+    release_config_lock
     return 1
   fi
   rm -f "$old_db" "$old_config"
+  release_config_lock
   return 0
 }
 
