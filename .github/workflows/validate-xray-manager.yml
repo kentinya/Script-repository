@@ -29,3 +29,5 @@ jobs:
               compile(match.group('body'),f"xray-manager.sh:{match.group('tag')}",'exec')
           print(f'Validated {len(parts)} embedded Python snippets')
           PY
+      - name: Test generated quota configuration
+        run: bash tests/check-node-quota.sh
