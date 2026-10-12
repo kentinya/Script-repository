@@ -637,7 +637,8 @@ setup_traffic_monitor() {
   # 保存自包含脚本供 systemd 定时器调用。
   local source="${BASH_SOURCE[0]}"
   if [[ "$source" != "$MANAGER_BIN" ]]; then
-    install -m 700 "$source" "$MANAGER_BIN" || die '安装流量监控脚本失败'
+    install -m 700 "$source" "$MANAGER_BIN.new" || die '安装流量监控脚本失败'
+    mv -f "$MANAGER_BIN.new" "$MANAGER_BIN"
   fi
   cat >"$TRAFFIC_UNIT" <<'EOF_TRAFFIC_UNIT'
 [Unit]
@@ -674,7 +675,7 @@ traffic_check() {
   if traffic_db reached ''; then
     make_candidate sync ''
     apply_candidate || { warn '无法自动停用超额节点，请检查日志！'; return 1; }
-    info '已自动停用超额节点，其他节点不受影响。'
+    info '超额节点已停用；重启 Xray 可能短暂中断其他节点的现有连接。'
   fi
 }
 
@@ -1272,7 +1273,7 @@ uninstall_all() {
     warn 'Xray 可执行文件并非由本脚本标记安装，保留以免影响其他程序。'
   fi
   systemctl disable --now xray-multi-traffic.timer >/dev/null 2>&1 || true
-  rm -f "$TRAFFIC_UNIT" "$TRAFFIC_TIMER" "$MANAGER_BIN"
+  rm -f "$TRAFFIC_UNIT" "$TRAFFIC_TIMER" "$MANAGER_BIN" "$MANAGER_BIN.new"
   systemctl daemon-reload
   rm -rf -- "$CONF_DIR" "$DATA_DIR"
   info '已删除本工具的服务和所有管理数据。'
@@ -1326,7 +1327,8 @@ Xray 多配置管理器 v1.5（需要 root，Linux + systemd）
   6. 单节点流量限制基于 Xray StatsService 入站统计，上下行字节相加；可用于代理节点及转发规则。
      首次设置额度后安装每分钟运行的 systemd 定时器（xray-multi-traffic.timer）。
      超额时从 Xray 的有效配置中停用对应节点，重置用量或调高额度可恢复。
-     这是分钟级配额，并非实时硬限速；峰值流量和非正常重启可能造成少量超额/漏计。
+     这是分钟级配额，并非实时硬限速；峰值流量和非正常重启可能造成超额/漏计。
+     启停限额会重启 Xray，其他节点继续存在，但当前连接可能短暂中断。
      仅统计 Xray 入站流量，不包含协议栈及运营商计费额外开销。
   7. 端口转发规则和节点统一保存 /var/lib/xray-multi/nodes.json，支持失败回滚。
      转发不是加密隧道；公网监听应在防火墙限制来源 IP，防止刷流量。
