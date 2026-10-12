@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Xray 多节点管理器 v1.5：VLESS + Vision + REALITY / Shadowsocks 2022
+# Xray 多节点管理器 v1.6：VLESS + Vision + REALITY / Shadowsocks 2022
 # 支持 Linux + systemd，建议 Debian 12 / Ubuntu 22.04+ / Rocky Linux 9。
 # 使用：sudo bash xray-manager.sh    或 sudo bash xray-manager.sh help
 set -Eeuo pipefail
@@ -108,7 +108,7 @@ PY_NODE_COUNT
   printf '%s' "$UI_ACCENT"
   cat <<'EOF_UI_BANNER'
   ╭──────────────────────────────────────────────────────────────╮
-  │  ◆  X R A Y   M U L T I                            v1.5     │
+  │  ◆  X R A Y   M U L T I                            v1.6     │
   │     多协议 · 多节点 · 一站式安全管理                          │
   ╰──────────────────────────────────────────────────────────────╯
 EOF_UI_BANNER
@@ -1588,7 +1588,7 @@ uninstall_all() {
 
 help_text() {
   cat <<'EOF'
-Xray 多配置管理器 v1.5（需要 root，Linux + systemd）
+Xray 多配置管理器 v1.6（需要 root，Linux + systemd）
 
 用法：sudo bash xray-manager.sh [命令] [节点名]
   不传参数        彩色中文交互菜单（文本输入支持左右方向键）
