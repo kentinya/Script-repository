@@ -644,7 +644,6 @@ setup_traffic_monitor() {
 [Unit]
 Description=Xray Multi Per-node Quota Check
 After=xray-multi.service
-Requires=xray-multi.service
 
 [Service]
 Type=oneshot
