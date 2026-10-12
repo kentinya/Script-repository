@@ -1,6 +1,6 @@
 # Xray Multi 多节点管理器使用说明（v1.5）
 
-> 适用脚本：[xray-manager.sh](../xray-manager.sh)｜仓库首页：[README](../README.md)
+> 适用脚本：[xray-manager.sh](./xray-manager.sh)｜仓库首页：[README](../README.md)
 >
 > 这是本仓库脚本的操作指南，不是 Xray-core 官方安装文档。请留意下文各节的安全提示与使用限制。
 
@@ -32,7 +32,7 @@
 SSH 登录服务器后执行：
 
 ~~~bash
-curl -fsSLo xray-manager.sh https://raw.githubusercontent.com/kentinya/Script-repository/main/xray-manager.sh
+curl -fsSLo xray-manager.sh https://raw.githubusercontent.com/kentinya/Script-repository/main/xray/xray-manager.sh
 sudo bash xray-manager.sh
 ~~~
 
@@ -105,7 +105,7 @@ www.example.org
 XRAY_GEO_COUNTRY=DE sudo -E bash xray-manager.sh add-reality
 ~~~
 
-> **重要的当前版本提示**：脚本 `tls_probe` 检测中存在 `TLSv1.4` 的字符串判断，而 Python TLS 1.3 连接返回 `TLSv1.3`。因此当前版本即使目标支持 TLS 1.3/h2，也可能被错误拒绝。在修正检测逻辑之前，REALITY 创建功能可能无法正常完成。此问题属于脚本实现问题，不是 SNI 填写方法导致的。
+> **TLS 目标检测说明**：脚本现在使用正确的 `TLSv1.3` 判断，并要求目标协商 HTTP/2（h2）。如果仍然失败，通常需要排查 DNS、出站 443 连接、证书有效性、目标 TLS/ALPN 能力及 Cloudflare 目标排除机制。
 
 **防滥用建议**：不要把 Cloudflare 排除当成“不会被刷流量”的保证。限制公网暴露、监测出站流量，并在云平台配置告警或硬性流量控制。`10` 或 `harden` 只针对未认证回落连接设置限速，不限制正常节点带宽，也不能防止所有滥用。
 
@@ -218,7 +218,7 @@ sudo ss -lntup
 
 **配置校验失败**：脚本会先测试候选 JSON，失败时保留原有节点配置。可查看终端中的 Xray 错误输出；不要通过手动覆盖在线 `config.json` 来绕过校验。
 
-**REALITY 随机 SNI 报错**：检查 DNS、VPS 出站 443、伪装目标对 TLS 1.3/h2 的支持，以及本指南第 5 节注明的当前版本 TLS 版本判断问题。使用自定义域名时，需要是实际可达且受支持的 HTTPS 站点。
+**REALITY 随机 SNI 报错**：检查 DNS、VPS 出站 443、伪装目标对 TLS 1.3/h2 的支持，以及伪装目标是否被 Cloudflare 网段检测排除。使用自定义域名时，需要是实际可达且受支持的 HTTPS 站点。
 
 **流量统计不更新**：先查看 Xray 服务及定时器运行情况：
 

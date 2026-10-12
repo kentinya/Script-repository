@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+SCRIPT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/xray-manager.sh"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/data" "$work/config"
@@ -10,8 +11,8 @@ TRAFFIC_STATE="$DATA_DIR/traffic.json"
 STATS_PORT=18785
 CONFIG_LOCK_FD=''
 # 仅引入待测的函数，不执行 main() 或要求 root/systemd。
-sed -n '/^release_config_lock() {/,/^}/p' xray-manager.sh > "$work/functions.sh"
-sed -n '/^make_candidate() {/,/^}/p' xray-manager.sh >> "$work/functions.sh"
+sed -n '/^release_config_lock() {/,/^}/p' "$SCRIPT" > "$work/functions.sh"
+sed -n '/^make_candidate() {/,/^}/p' "$SCRIPT" >> "$work/functions.sh"
 source "$work/functions.sh"
 
 python3 - "$DB" "$TRAFFIC_STATE" <<'PY'

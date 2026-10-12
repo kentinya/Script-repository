@@ -848,7 +848,7 @@ def tls_probe(host,port,server_name):
                 sock.settimeout(3)
                 sock.connect(addr)
                 with ctx.wrap_socket(sock,server_hostname=server_name) as tls:
-                    if tls.version()=='TLSv1.4' and tls.selected_alpn_protocol()=='h2':
+                    if tls.version()=='TLSv1.3' and tls.selected_alpn_protocol()=='h2':
                         return ip
                     last='TLS 1.3 或 h2 不符合要求'
         except (OSError,ssl.SSLError) as e:

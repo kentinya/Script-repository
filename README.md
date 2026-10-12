@@ -1,43 +1,23 @@
+# Script Repository
+
 ## Xray 多节点管理器（v1.5）
 
-支持 VLESS + REALITY、Shadowsocks 2022、TCP / UDP 端口转发，以及各节点独立的累计流量配额。
+支持 VLESS + Vision + REALITY、Shadowsocks 2022、TCP / UDP 端口转发，以及每个节点独立的累计流量配额。
 
-**📘 [Xray 脚本完整使用说明（安装、菜单、节点、转发、流量限制、故障排查）](docs/xray-manager.md)**
+- [Xray 脚本与测试（xray/）](xray/)
+- **[Xray 详细使用说明](xray/README.md)**（安装、菜单、节点、随机 SNI、端口转发、流量配额、排错与卸载）
 
-快速开始：
+快速安装及启动：
 
-~~~bash
-curl -fsSLo xray-manager.sh https://raw.githubusercontent.com/kentinya/Script-repository/main/xray-manager.sh
-sudo bash xray-manager.sh
-~~~
-
-首次启动选择 `01` 安装 Xray；以后运行同一脚本即可进入交互菜单。想直接查看命令行用法，可执行 `bash xray-manager.sh help`。
-
-> 提示：流量配额为分钟级累计上/下行限额，不是硬实时限速；请同时做好防火墙和云平台流量告警。当前 REALITY TLS 目标检测还存在版本判断问题，详见[使用说明中的注意事项](docs/xray-manager.md#5-新建-vless--reality-节点)。
-
-## Realm转发脚本使用
-### 功能
-- 一键添加配置
-- 一键安装、更新、删除Realm
-- 支持安装包本地安装
-- 查看存在的配置规则
-- 支持tls,ws,wss加密
-- 支持证书配置
-- 启动与查看日志
-### 安装脚本使用
-``` bash
-wget -N https://raw.githubusercontent.com/kentinya/Script-repository/refs/heads/main/Realm/realm_install.sh && chmod +x realm_install.sh
-```
-``` bash
-bash realm_install.sh
-```
-### 添加tls
 ```bash
-wget -N https://raw.githubusercontent.com/kentinya/Script-repository/refs/heads/main/Realm/realm_tls.sh && chmod +x realm_tls.sh
+curl -fsSLo xray-manager.sh https://raw.githubusercontent.com/kentinya/Script-repository/main/xray/xray-manager.sh
+sudo bash xray-manager.sh
 ```
-``` bash
-bash realm_tls.sh
-```
+
+首次打开菜单选择 **01** 安装 Xray；再次管理可运行 `sudo bash xray-manager.sh`。使用 `bash xray-manager.sh help` 查看命令行帮助。
+
+> 单节点流量配额是分钟级累计上/下行额度，不是硬实时限速。请同时配置防火墙及云平台流量告警。
+
 ## 增加虚拟内存脚本
 ### 功能
 - 增加VPS虚拟内存
@@ -86,23 +66,4 @@ wget -N https://raw.githubusercontent.com/kentinya/Script-repository/main/creat_
 ```
 ```bash
 bash replace_str_in_strm.sh
-```
-
-## gost转发脚本使用
-
-### 安装
-``` bash
-wget -N https://raw.githubusercontent.com/kentinya/Script-repository/refs/heads/main/gost/gost_install.sh && chmod +x gost_install.sh
-```
-``` bash
-bash gost_install.sh
-```
-
-### 节点
-
-``` bash
-wget -N https://raw.githubusercontent.com/kentinya/Script-repository/refs/heads/main/gost/add_gost.sh && chmod +x add_gost.sh
-```
-``` bash
-bash add_gost.sh
 ```
