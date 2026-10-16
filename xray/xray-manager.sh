@@ -398,10 +398,27 @@ PY_HAS_FORWARD
 }
 
 require_installed() {
-  [[ -x "$BIN" && -f "$DB" && -f "$UNIT" ]] || {
-    warn '尚未完成初始化，开始安装 Xray……'
-    install_xray
-  }
+  # 节点操作只使用本地 Xray；不应因管理文件缺失而触发在线下载。
+  [[ -x "$BIN" ]] || die "未找到可执行的 Xray：$BIN。请先手动上传，或从菜单选择在线安装。"
+  "$BIN" version >/dev/null 2>&1 || die "本地 Xray 无法运行：$BIN。请检查 CPU 架构及执行权限。"
+
+  # 手动上传 Xray 的主机可能没有安装依赖；不要在低内存 VPS 上隐式执行 apt/dnf。
+  local p missing=()
+  for p in python3 openssl curl ss flock; do
+    command -v "$p" >/dev/null 2>&1 || missing+=("$p")
+  done
+  ((#missing[@]} == 0)) || die "缺少依赖：${missing[*]}。请先手动安装后重试。"
+
+  # 自动补全首次使用所需的数据目录、空配置和独立 systemd 服务。
+  if [[ ! -f "$DB" || ! -f "$CONFIG" || ! -f "$UNIT" ]]; then
+    info '检测到本地 Xray，正在初始化管理环境（不会下载 Xray）……'
+    create_layout
+    if [[ ! -f "$UNIT" ]]; then
+      write_unit
+    fi
+    systemctl enable "$SERVICE" >/dev/null || die "启用 $SERVICE 失败。"
+    info '本地 Xray 管理环境已初始化。'
+  fi
 }
 
 ask() {
