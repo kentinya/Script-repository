@@ -407,7 +407,7 @@ require_installed() {
   for p in python3 openssl curl ss flock; do
     command -v "$p" >/dev/null 2>&1 || missing+=("$p")
   done
-  ((#missing[@]} == 0)) || die "缺少依赖：${missing[*]}。请先手动安装后重试。"
+  ((${#missing[@]} == 0)) || die "缺少依赖：${missing[*]}。请先手动安装后重试。"
 
   # 自动补全首次使用所需的数据目录、空配置和独立 systemd 服务。
   if [[ ! -f "$DB" || ! -f "$CONFIG" || ! -f "$UNIT" ]]; then
