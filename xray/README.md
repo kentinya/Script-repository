@@ -36,7 +36,21 @@ curl -fsSLo xray-manager.sh https://raw.githubusercontent.com/kentinya/Script-re
 sudo bash xray-manager.sh
 ~~~
 
-第一次打开菜单，输入 `01` 安装 Xray。程序会从 Xray-core 官方 GitHub Release 获取正式版并校验 SHA256，随后创建并启动 `xray-multi.service`。
+需要在线安装时，第一次打开菜单输入 `01`；脚本会从 Xray-core 官方 GitHub Release 下载正式版并校验 SHA256，随后创建并启动 `xray-multi.service`。如果已手动上传 Xray，请**不要选择 `01`**，直接新增节点即可。
+
+### 手动上传 Xray（适合低内存 NAT VPS）
+
+可以在本地电脑下载并解压 [Xray-core 官方 Release](https://github.com/XTLS/Xray-core/releases)，将适合服务器 CPU 架构的 **`xray` 可执行文件** 上传到服务器，例如 `/root/xray`。登录服务器后执行：
+
+~~~bash
+sudo install -m 755 /root/xray /usr/local/bin/xray
+/usr/local/bin/xray version
+sudo bash xray-manager.sh add-reality
+~~~
+
+也可以运行管理菜单，直接选择 `03`（REALITY）或 `04`（Shadowsocks 2022）。**首次添加节点时，即使缺少 `nodes.json`、初始配置或 `xray-multi.service`，脚本也只会创建这些管理文件，不会重新下载 Xray。** 如果没有可执行的 `/usr/local/bin/xray`，则提示先手动上传或主动选择在线安装，不再因为添加节点自动触发下载。
+
+手动上传模式不会自动安装系统依赖；请预先准备 `python3`、`openssl`、`curl`、`ss`（iproute2）、`flock`（util-linux）。`qrencode` 仅用于展示或保存二维码，缺失时仍可创建节点。只有用户明确选择安装/更新（菜单 `01`/`02` 或 `install`/`update` 命令）才会执行在线下载。96MB VPS 即使跳过下载，运行 Xray 或执行相关工具时仍可能内存不足。
 
 以后再次管理，切换到保存脚本的目录并执行：
 
