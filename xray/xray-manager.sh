@@ -1054,6 +1054,9 @@ try:
                 if data and data.get('asn')==13335:
                     log('%s 已排除：Cloudflare ASN 13335。' % host)
                     continue
+                if ':' in ip:
+                    log('%s 仅 IPv6 可用：当前自动固定目标地址使用 IPv4，跳过。' % host)
+                    continue
                 rank,kind=score(data,hint)
                 ranked.append((rank,host,ip,kind,data))
             except (OSError,ValueError) as e:
@@ -1071,7 +1074,7 @@ try:
             log('REALITY 待测：%s (%s)，IP %s、国家/地区 %s、ASN %s。' % (
                 host,kind,ip,(data or {}).get('country','未知'),
                 (data or {}).get('asn','未知')))
-            print(host)
+            print(host+' '+ip)
     else:
         raise ValueError('未知目标检测模式')
 except (OSError,ValueError) as e:
@@ -1130,7 +1133,7 @@ def check(binary,sni,dest):
                     except OSError: pass
         threading.Thread(target=serve,daemon=True).start()
         uid=str(uuid.uuid4()); sid=os.urandom(8).hex()
-        cfg={'log':{'loglevel':'warning'},'inbounds':[
+        cfg={'log':{'loglevel':'debug'},'inbounds':[
             {'tag':'socks','listen':'127.0.0.1','port':sp,'protocol':'socks','settings':{'auth':'noauth'}},
             {'tag':'reality','listen':'127.0.0.1','port':rp,'protocol':'vless',
              'settings':{'clients':[{'id':uid,'flow':'xtls-rprx-vision'}],'decryption':'none'},
@@ -1153,6 +1156,7 @@ def check(binary,sni,dest):
                 with open(os.path.join(tmp,'xray.log'),'wb') as log:
                     proc=subprocess.Popen([binary,'run','-format','json','-config',path],
                                           stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT)
+                    stage='启动临时 Xray'
                     try:
                         for _ in range(40):
                             if proc.poll() is not None: raise ValueError('临时 Xray 启动失败')
@@ -1160,10 +1164,13 @@ def check(binary,sni,dest):
                                 with socket.create_connection(('127.0.0.1',sp),timeout=.3): break
                             except OSError: time.sleep(.1)
                         else: raise ValueError('临时 Xray 启动超时')
-                        for _ in range(2):
+                        for round_no in range(1,3):
+                            stage=f'第{round_no}轮连接 SOCKS5 入口'
                             with socket.create_connection(('127.0.0.1',sp),timeout=5) as sock:
-                                sock.settimeout(6); sock.sendall(b'\x05\x01\x00')
+                                stage=f'第{round_no}轮 SOCKS5 方法协商'
+                                sock.settimeout(12); sock.sendall(b'\x05\x01\x00')
                                 if readn(sock,2)!=b'\x05\x00': raise ValueError('SOCKS 方法失败')
+                                stage=f'第{round_no}轮 REALITY 握手 / SOCKS5 CONNECT'
                                 sock.sendall(b'\x05\x01\x00\x01\x7f\x00\x00\x01'+ep.to_bytes(2,'big'))
                                 hdr=readn(sock,4)
                                 if hdr[:2]!=b'\x05\x00': raise ValueError('REALITY 链路失败 (SOCKS %d)'%hdr[1])
@@ -1171,8 +1178,21 @@ def check(binary,sni,dest):
                                 elif hdr[3]==3: readn(sock,readn(sock,1)[0]+2)
                                 elif hdr[3]==4: readn(sock,18)
                                 else: raise ValueError('SOCKS 地址类型不合法')
+                                stage=f'第{round_no}轮数据回显'
                                 data=os.urandom(16); sock.sendall(data)
                                 if readn(sock,len(data))!=data: raise ValueError('REALITY 数据往返不一致')
+                    except Exception as exc:
+                        try:
+                            with open(os.path.join(tmp,'xray.log'),encoding='utf-8',errors='replace') as log_in:
+                                lines=log_in.readlines()[-16:]
+                            if lines:
+                                print('[REALITY 临时 Xray 日志（末 16 行）]',file=sys.stderr)
+                                for line in lines:
+                                    print('  '+line.rstrip()[:240],file=sys.stderr)
+                        except OSError: pass
+                        if isinstance(exc,TimeoutError):
+                            raise TimeoutError(f'{stage}: {exc}') from exc
+                        raise
                     finally:
                         if proc.poll() is None: proc.terminate()
                         try: proc.wait(timeout=2)
@@ -1180,6 +1200,9 @@ def check(binary,sni,dest):
         finally: done.set()
 
 try: check(*sys.argv[1:4])
+except TimeoutError as exc:
+    print('[REALITY 自检] '+str(exc)[:200],file=sys.stderr)
+    sys.exit(2)
 except (OSError,ValueError,subprocess.SubprocessError) as exc:
     print('[REALITY 自检] '+str(exc)[:170],file=sys.stderr)
     sys.exit(1)
@@ -1190,7 +1213,7 @@ add_reality() {
   require_installed
   say '新增 VLESS + Vision + REALITY 节点'
   ask_base 443
-  local sni dest raw priv pub uuid sid dest_host dest_port server_ip was_random=0 candidates candidate
+  local sni dest raw priv pub uuid sid dest_host dest_port server_ip was_random=0 candidates candidate candidate_ip selected_ip='' default_dest test_status
   server_ip="$(public_address)"
   ask sni 'REALITY 伪装目标 SNI（输入 random 随机选择，或手动填写域名）' 'random'
   case "${sni,,}" in
@@ -1199,12 +1222,23 @@ add_reality() {
       was_random=1
       candidates="$(random_reality_sni "$server_ip")" || die '自动选择 REALITY SNI 失败。'
       sni=''
-      while IFS= read -r candidate; do
-        [[ -n "$candidate" ]] || continue
-        info "尝试 REALITY 全链路连接：$candidate"
-        if reality_smoke_test "$candidate" "$candidate:443"; then
+      while read -r candidate candidate_ip; do
+        [[ -n "$candidate" && -n "$candidate_ip" ]] || continue
+        info "尝试 REALITY 全链路连接：$candidate -> $candidate_ip"
+        if reality_smoke_test "$candidate" "$candidate_ip:443"; then
           sni="$candidate"
+          selected_ip="$candidate_ip"
           break
+        else
+          test_status=$?
+        fi
+        if ((test_status == 2)); then
+          warn "目标 $candidate 握手/数据接收超时，使用相同 IP 重试一次……"
+          if reality_smoke_test "$candidate" "$candidate_ip:443"; then
+            sni="$candidate"
+            selected_ip="$candidate_ip"
+            break
+          fi
         fi
         warn "目标 $candidate 在 REALITY 实测失败，尝试下一个候选。"
       done <<<"$candidates"
@@ -1213,16 +1247,21 @@ add_reality() {
       ;;
     *) valid_sni "$sni" || die 'SNI 必须是有效域名。' ;;
   esac
-  ask dest 'REALITY 目标地址（域名:端口）' "$sni:443"
+  default_dest="$sni:443"
+  if ((was_random)); then
+    default_dest="$selected_ip:443"
+    info "随机目标已固定到初筛通过的 IPv4：$default_dest（IP 变化后可能需要更新）"
+  fi
+  ask dest 'REALITY 目标地址（域名或 IPv4:端口）' "$default_dest"
   [[ "$dest" =~ ^([^:]+):([0-9]{1,5})$ ]] || die 'REALITY 目标地址格式不正确。'
   dest_host="${BASH_REMATCH[1]}"
   dest_port="${BASH_REMATCH[2]}"
   valid_host "$dest_host" && valid_port "$dest_port" || die 'REALITY 目标域名或端口不合法。'
-  if [[ "$dest_host" != "$sni" ]]; then
+  if [[ "$dest_host" != "$sni" && "$dest_host" != "$selected_ip" ]]; then
     warn '目标地址与 SNI 不相同，将按真实目标地址检测 TLS 与 Cloudflare。'
   fi
   # 手动 SNI 必须验证；随机结果修改了目标地址也必须重验。
-  if ((was_random == 0)) || [[ "$dest" != "$sni:443" ]]; then
+  if ((was_random == 0)) || [[ "$dest" != "$default_dest" ]]; then
     info '检测指定的目标是否支持 TLS 1.3/h2，以及是否使用 Cloudflare……'
     reality_target_probe verify "$server_ip" "$sni" "$dest_host" "$dest_port" >/dev/null \
       || die '该 REALITY 目标不可用或不安全，已阻止创建节点。'
