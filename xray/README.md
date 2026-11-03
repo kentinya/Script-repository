@@ -104,8 +104,8 @@ bash xray-manager.sh help
 - 根据 VPS 的公网出口 IP 查询 ASN、国家/地区、大洲，并优先选择较接近的候选目标；地理定位不是精确保证。
 - 候选域名需要通过 DNS、TLS 1.3、HTTP/2（h2）等检查。
 - 对 DNS 解析到的 Cloudflare 已知 IP 网段及识别到的 Cloudflare ASN 13335 做排除；无法保证未来 DNS、CDN、Anycast 或流量风险完全不变。
-- TLS/DNS 初筛之后，**对优先候选依次执行真实 Xray VLESS + REALITY + Vision 本机连接自检**：仅监听 `127.0.0.1`，使用初筛通过的 IPv4 地址作为 REALITY 目标，通过 SOCKS5 连续两次往返本机测试数据。连接/读取超时时会用同一 IP 重试一次，再尝试下一个候选（最多 6 个）；全部失败则不创建节点，原有节点不变。
-- 自检读取超时由 6 秒调整为 12 秒；失败时会显示具体测试阶段，并打印临时 Xray 的最后 16 行日志供排查。**这只提升诊断和降低偶发误判，不能保证所有站点都兼容 REALITY。**
+- TLS/DNS 初筛之后，**对优先候选依次执行真实 Xray VLESS + REALITY + Vision 本机连接自检**：临时监听 `127.0.0.1`，使用初筛通过的 IPv4 地址作为 REALITY 目标，通过 SOCKS5 建立完整 REALITY 连接，再向筛选通过的公网目标执行两次 TLS 1.3 + HTTP/2 双向数据测试（无需本机 Echo 端口）。连接/读取超时时会用同一 IP 重试一次，再尝试下一个候选（最多 6 个）；全部失败则不创建节点，原有节点不变。
+- 自检读取超时为 12 秒；失败时会显示具体测试阶段，并打印临时 Xray 的最后 16 行日志供排查。之前的回环 Echo 测试在部分新版 Xray 上会触发 `freedom: blocked target: 127.0.0.1`，现改为经隧道连接公网目标并验证实际 HTTPS/h2 数据收发。**仍不能保证所有站点都兼容 REALITY。**
 - 手动 SNI 或修改 REALITY 目标地址时也会执行相同的真实连接检测，有助于排除普通 HTTPS 正常而 REALITY 握手失败的目标。
 - 默认随机候选池已移除曾在部分版本/地区触发 REALITY 握手问题的 `www.microsoft.com`，详见 [Xray-core #6356](https://github.com/XTLS/Xray-core/issues/6356)。
 - 临时实例不修改当前 Xray 服务，但会进行少量对外 TLS 流量；**通过本机测试仍无法保证公网线路、其他客户端版本、未来 DNS 或目标站点一直可用**。
@@ -136,7 +136,7 @@ XRAY_GEO_COUNTRY=DE sudo -E bash xray-manager.sh add-reality
 sudo bash xray-manager.sh reality-check reality-hk
 ~~~
 
-该命令读取节点当前的 SNI 与 REALITY 目标，先执行 TLS + Cloudflare 检测，再做两次本机 REALITY 数据往返测试。**不会修改或重启原有服务**。如果旧节点实测失败，可新建节点，确认连接后更新客户端分享链接，再删除旧节点。新建节点会生成新 UUID、密钥和 Short ID，旧连接不会自动迁移。
+该命令读取节点当前的 SNI 与 REALITY 目标，先执行 TLS + Cloudflare 检测，再通过临时本机 REALITY 链路对公网 HTTPS 目标进行两次 TLS/h2 数据收发测试。**不会修改或重启原有服务**。如果旧节点实测失败，可新建节点，确认连接后更新客户端分享链接，再删除旧节点。新建节点会生成新 UUID、密钥和 Short ID，旧连接不会自动迁移。
 
 检查通过也不能保证旧客户端可用；请同时核实公网端口、安全组、防火墙、客户端版本及两端系统时间。
 
@@ -256,7 +256,7 @@ sudo ss -lntup
 
 **配置校验失败**：脚本会先测试候选 JSON，失败时保留原有节点配置。可查看终端中的 Xray 错误输出；不要通过手动覆盖在线 `config.json` 来绕过校验。
 
-**REALITY 随机 SNI 报错**：普通 TLS 能连接并不保证 REALITY 一定能使用；脚本会跳过本机 REALITY 实测失败的候选。若全部超时，重点查看 `[REALITY 自检]` 后的具体阶段和 `[REALITY 临时 Xray 日志]`，判断是 SOCKS5、REALITY 握手还是数据回显问题。随机模式会固定初筛通过的 IPv4，避免 DNS/IPv6 变化导致误判。还应检查 VPS 出站 443、TLS 1.3/h2、证书兼容性与 Cloudflare 排除。
+**REALITY 随机 SNI 报错**：普通 TLS 能连接并不保证 REALITY 一定能使用；脚本会跳过本机 REALITY 实测失败的候选。若全部超时，重点查看 `[REALITY 自检]` 后的具体阶段和 `[REALITY 临时 Xray 日志]`，判断是 SOCKS5、REALITY 握手还是经隧道执行 TLS/h2 时的问题。随机模式会固定初筛通过的 IPv4，避免 DNS/IPv6 变化导致误判。还应检查 VPS 出站 443、TLS 1.3/h2、证书兼容性与 Cloudflare 排除。
 
 **流量统计不更新**：先查看 Xray 服务及定时器运行情况：
 
