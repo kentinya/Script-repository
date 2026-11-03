@@ -1091,16 +1091,20 @@ random_reality_sni() {
 
 # 普通 TLS 1.3/h2 检测不足以保证 REALITY 握手兼容（例如目标证书记录过大）。
 # 临时 Xray 仅监听 127.0.0.1，经 SOCKS5 和 REALITY 完成两次数据往返，不修改线上服务。
+# REALITY 自检：完整的 SOCKS5 → VLESS/Vision/REALITY → 公网 HTTPS/h2 链路。
+# 不再用 127.0.0.1 Echo 测试：新版本 Xray 的 freedom 出站会拒绝回环目标。
+# 仅临时监听本机端口，不修改现有服务；远端目标采用已通过 TLS 初筛的 IP。
 reality_smoke_test() {
   python3 - "$BIN" "$1" "$2" <<'PY_REALITY_SMOKE'
-import json,os,re,socket,subprocess,sys,tempfile,threading,time,uuid
+import json,os,re,socket,ssl,subprocess,sys,tempfile,time,uuid
 
 def readn(sock,n):
     data=b''
     while len(data)<n:
-        piece=sock.recv(n-len(data))
-        if not piece: raise OSError('SOCKS 连接提前关闭')
-        data+=piece
+        part=sock.recv(n-len(data))
+        if not part:
+            raise OSError('连接提前关闭，未收到预期数据')
+        data+=part
     return data
 
 def freeport():
@@ -1108,98 +1112,130 @@ def freeport():
         s.bind(('127.0.0.1',0))
         return s.getsockname()[1]
 
+def socks_address(host,port):
+    try:
+        return b'\x01'+socket.inet_aton(host)+port.to_bytes(2,'big')
+    except OSError:
+        name=host.encode('idna')
+        if not 1<=len(name)<=255:
+            raise ValueError('SOCKS 目标域名过长')
+        return b'\x03'+bytes([len(name)])+name+port.to_bytes(2,'big')
+
 def check(binary,sni,dest):
+    dest_host,dest_port_raw=dest.rsplit(':',1)
+    dest_port=int(dest_port_raw)
+    if not 1<=dest_port<=65535:
+        raise ValueError('目标端口无效')
+    request=socks_address(dest_host,dest_port)
+
     output=subprocess.run([binary,'x25519'],capture_output=True,text=True,check=True,timeout=8).stdout
     pairs={re.sub('[^a-z]','',k.lower()):v.strip().split()[0] for line in output.splitlines()
            if ':' in line for k,v in [line.split(':',1)] if v.strip()}
     priv=pairs.get('privatekey','')
     pub=next((v for k,v in pairs.items() if k.startswith(('publickey','password'))),'')
-    if not priv or not pub: raise ValueError('无法生成临时 REALITY 密钥')
+    if not priv or not pub:
+        raise ValueError('无法生成临时 REALITY 密钥')
     rp,sp=freeport(),freeport()
-    with socket.socket() as echo:
-        echo.bind(('127.0.0.1',0)); echo.listen(2); ep=echo.getsockname()[1]
-        done=threading.Event()
-        def serve():
-            echo.settimeout(.2)
-            while not done.is_set():
-                try: conn,_=echo.accept()
-                except socket.timeout: continue
-                except OSError: break
-                with conn:
-                    conn.settimeout(6)
-                    try:
-                        data=conn.recv(100)
-                        if data: conn.sendall(data)
-                    except OSError: pass
-        threading.Thread(target=serve,daemon=True).start()
-        uid=str(uuid.uuid4()); sid=os.urandom(8).hex()
-        cfg={'log':{'loglevel':'debug'},'inbounds':[
-            {'tag':'socks','listen':'127.0.0.1','port':sp,'protocol':'socks','settings':{'auth':'noauth'}},
-            {'tag':'reality','listen':'127.0.0.1','port':rp,'protocol':'vless',
-             'settings':{'clients':[{'id':uid,'flow':'xtls-rprx-vision'}],'decryption':'none'},
-             'streamSettings':{'network':'tcp','security':'reality','realitySettings':{
-                 'target':dest,'serverNames':[sni],'privateKey':priv,'shortIds':[sid]}}}],
-             'outbounds':[
-            {'tag':'client','protocol':'vless',
-             'settings':{'vnext':[{'address':'127.0.0.1','port':rp,
-                                   'users':[{'id':uid,'encryption':'none','flow':'xtls-rprx-vision'}]}]},
-             'streamSettings':{'network':'tcp','security':'reality','realitySettings':{
-                 'serverName':sni,'fingerprint':'chrome','password':pub,'shortId':sid}}},
-            {'tag':'direct','protocol':'freedom'}],
-            'routing':{'rules':[{'type':'field','inboundTag':['socks'],'outboundTag':'client'},
-                                {'type':'field','inboundTag':['reality'],'outboundTag':'direct'}]}}
-        try:
-            with tempfile.TemporaryDirectory(prefix='xray-reality-check-') as tmp:
-                path=os.path.join(tmp,'config.json')
-                with open(path,'w') as f: json.dump(cfg,f)
-                os.chmod(path,0o600)
-                with open(os.path.join(tmp,'xray.log'),'wb') as log:
-                    proc=subprocess.Popen([binary,'run','-format','json','-config',path],
-                                          stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT)
-                    stage='启动临时 Xray'
-                    try:
-                        for _ in range(40):
-                            if proc.poll() is not None: raise ValueError('临时 Xray 启动失败')
-                            try:
-                                with socket.create_connection(('127.0.0.1',sp),timeout=.3): break
-                            except OSError: time.sleep(.1)
-                        else: raise ValueError('临时 Xray 启动超时')
-                        for round_no in range(1,3):
-                            stage=f'第{round_no}轮连接 SOCKS5 入口'
-                            with socket.create_connection(('127.0.0.1',sp),timeout=5) as sock:
-                                stage=f'第{round_no}轮 SOCKS5 方法协商'
-                                sock.settimeout(12); sock.sendall(b'\x05\x01\x00')
-                                if readn(sock,2)!=b'\x05\x00': raise ValueError('SOCKS 方法失败')
-                                stage=f'第{round_no}轮 REALITY 握手 / SOCKS5 CONNECT'
-                                sock.sendall(b'\x05\x01\x00\x01\x7f\x00\x00\x01'+ep.to_bytes(2,'big'))
-                                hdr=readn(sock,4)
-                                if hdr[:2]!=b'\x05\x00': raise ValueError('REALITY 链路失败 (SOCKS %d)'%hdr[1])
-                                if hdr[3]==1: readn(sock,6)
-                                elif hdr[3]==3: readn(sock,readn(sock,1)[0]+2)
-                                elif hdr[3]==4: readn(sock,18)
-                                else: raise ValueError('SOCKS 地址类型不合法')
-                                stage=f'第{round_no}轮数据回显'
-                                data=os.urandom(16); sock.sendall(data)
-                                if readn(sock,len(data))!=data: raise ValueError('REALITY 数据往返不一致')
-                    except Exception as exc:
-                        try:
-                            with open(os.path.join(tmp,'xray.log'),encoding='utf-8',errors='replace') as log_in:
-                                lines=log_in.readlines()[-16:]
-                            if lines:
-                                print('[REALITY 临时 Xray 日志（末 16 行）]',file=sys.stderr)
-                                for line in lines:
-                                    print('  '+line.rstrip()[:240],file=sys.stderr)
-                        except OSError: pass
-                        if isinstance(exc,TimeoutError):
-                            raise TimeoutError(f'{stage}: {exc}') from exc
-                        raise
-                    finally:
-                        if proc.poll() is None: proc.terminate()
-                        try: proc.wait(timeout=2)
-                        except subprocess.TimeoutExpired: proc.kill(); proc.wait(timeout=2)
-        finally: done.set()
+    uid=str(uuid.uuid4())
+    sid=os.urandom(8).hex()
+    cfg={'log':{'loglevel':'debug'},'inbounds':[
+        {'tag':'socks','listen':'127.0.0.1','port':sp,'protocol':'socks','settings':{'auth':'noauth'}},
+        {'tag':'reality','listen':'127.0.0.1','port':rp,'protocol':'vless',
+         'settings':{'clients':[{'id':uid,'flow':'xtls-rprx-vision'}],'decryption':'none'},
+         'streamSettings':{'network':'tcp','security':'reality','realitySettings':{
+             'target':dest,'serverNames':[sni],'privateKey':priv,'shortIds':[sid]}}}],
+         'outbounds':[
+        {'tag':'client','protocol':'vless',
+         'settings':{'vnext':[{'address':'127.0.0.1','port':rp,
+                               'users':[{'id':uid,'encryption':'none','flow':'xtls-rprx-vision'}]}]},
+         'streamSettings':{'network':'tcp','security':'reality','realitySettings':{
+             'serverName':sni,'fingerprint':'chrome','password':pub,'shortId':sid}}},
+        {'tag':'direct','protocol':'freedom'}],
+        'routing':{'rules':[{'type':'field','inboundTag':['socks'],'outboundTag':'client'},
+                            {'type':'field','inboundTag':['reality'],'outboundTag':'direct'}]}}
 
-try: check(*sys.argv[1:4])
+    tls_ctx=ssl.create_default_context()
+    tls_ctx.minimum_version=ssl.TLSVersion.TLSv1_3
+    tls_ctx.maximum_version=ssl.TLSVersion.TLSv1_3
+    tls_ctx.set_alpn_protocols(['h2'])
+    h2_preface=b'PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n'
+    h2_settings=b'\x00\x00\x00\x04\x00\x00\x00\x00\x00'
+
+    with tempfile.TemporaryDirectory(prefix='xray-reality-check-') as tmp:
+        path=os.path.join(tmp,'config.json')
+        with open(path,'w') as f:
+            json.dump(cfg,f)
+        os.chmod(path,0o600)
+        with open(os.path.join(tmp,'xray.log'),'wb') as log:
+            proc=subprocess.Popen([binary,'run','-format','json','-config',path],
+                                  stdin=subprocess.DEVNULL,stdout=log,stderr=subprocess.STDOUT)
+            stage='启动临时 Xray'
+            try:
+                for _ in range(40):
+                    if proc.poll() is not None:
+                        raise ValueError('临时 Xray 启动失败')
+                    try:
+                        with socket.create_connection(('127.0.0.1',sp),timeout=.3):
+                            break
+                    except OSError:
+                        time.sleep(.1)
+                else:
+                    raise TimeoutError('临时 Xray 启动超时')
+
+                for round_no in range(1,3):
+                    stage=f'第{round_no}轮连接 SOCKS5 入口'
+                    with socket.create_connection(('127.0.0.1',sp),timeout=5) as sock:
+                        sock.settimeout(12)
+                        stage=f'第{round_no}轮 SOCKS5 方法协商'
+                        sock.sendall(b'\x05\x01\x00')
+                        if readn(sock,2)!=b'\x05\x00':
+                            raise ValueError('SOCKS 方法协商失败')
+
+                        stage=f'第{round_no}轮 REALITY 握手 / 公网 SOCKS5 CONNECT'
+                        sock.sendall(b'\x05\x01\x00'+request)
+                        hdr=readn(sock,4)
+                        if hdr[:2]!=b'\x05\x00':
+                            raise ValueError('REALITY 链路失败 (SOCKS %d)'%hdr[1])
+                        if hdr[3]==1:
+                            readn(sock,6)
+                        elif hdr[3]==3:
+                            readn(sock,readn(sock,1)[0]+2)
+                        elif hdr[3]==4:
+                            readn(sock,18)
+                        else:
+                            raise ValueError('SOCKS 返回了无效地址类型')
+
+                        stage=f'第{round_no}轮经 REALITY 执行 HTTPS TLS 握手'
+                        with tls_ctx.wrap_socket(sock,server_hostname=sni) as tls:
+                            if tls.version()!='TLSv1.3' or tls.selected_alpn_protocol()!='h2':
+                                raise ValueError('隧道内 TLS 1.3/h2 协商失败')
+                            stage=f'第{round_no}轮经 REALITY 发送 HTTP/2 并读取响应'
+                            tls.sendall(h2_preface+h2_settings)
+                            readn(tls,9)
+            except Exception as exc:
+                try:
+                    with open(os.path.join(tmp,'xray.log'),encoding='utf-8',errors='replace') as log_in:
+                        lines=log_in.readlines()[-16:]
+                    if lines:
+                        print('[REALITY 临时 Xray 日志（末 16 行）]',file=sys.stderr)
+                        for line in lines:
+                            print('  '+line.rstrip()[:240],file=sys.stderr)
+                except OSError:
+                    pass
+                if isinstance(exc,TimeoutError):
+                    raise TimeoutError(f'{stage}: {exc}') from exc
+                raise
+            finally:
+                if proc.poll() is None:
+                    proc.terminate()
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=2)
+
+try:
+    check(*sys.argv[1:4])
 except TimeoutError as exc:
     print('[REALITY 自检] '+str(exc)[:200],file=sys.stderr)
     sys.exit(2)
