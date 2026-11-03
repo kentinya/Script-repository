@@ -1553,7 +1553,7 @@ PY
 }
 
 show_node() {
-  local name="${1:-}" url kind port host
+  local name="${1:-}" url kind extras=""
   [[ -f "$DB" ]] || die '暂无节点。'
   if [[ -z "$name" ]]; then
     node_names
@@ -1572,21 +1572,61 @@ try:
 except ValueError: pass
 frag=urllib.parse.quote(n['name'],safe='')
 if n['kind']=='reality':
-    q=urllib.parse.urlencode({'encryption':'none','flow':'xtls-rprx-vision','security':'reality',
-        'sni':n['sni'],'fp':'chrome','pbk':n['public_key'],'sid':n['short_id'],'type':'tcp'})
-    url=f"vless://{n['uuid']}@{host}:{n['port']}?{q}#{frag}"
+    params={'encryption':'none','flow':'xtls-rprx-vision','security':'reality',
+        'sni':n['sni'],'fp':'chrome','pbk':n['public_key'],'sid':n['short_id'],'type':'tcp'}
+    base=f"vless://{n['uuid']}@{host}:{n['port']}"
+    q=urllib.parse.urlencode({**params,'support-x25519mlkem768':'true'})
+    url=f"{base}?{q}#{frag}"
+    legacy=f"{base}?{urllib.parse.urlencode(params)}#{frag}"
 else:
     u=f"{n['method']}:{n['password']}".encode()
     b64=base64.urlsafe_b64encode(u).decode().rstrip('=')
     url=f"ss://{b64}@{host}:{n['port']}#{frag}"
 print(n['kind'])
 print(url)
+if n['kind']=='reality':
+    quote=lambda value:json.dumps(str(value),ensure_ascii=False)
+    print()
+    print('备用原始 VLESS 链接（旧版 Xray 或旧客户端）：')
+    print(legacy)
+    print()
+    print('Mihomo YAML（订阅转换工具可能丢失 URL 扩展参数）：')
+    print('proxies:')
+    print('  - name: '+quote(n['name']))
+    print('    type: vless')
+    print('    server: '+quote(n['host']))
+    print('    port: '+str(n['port']))
+    print('    uuid: '+quote(n['uuid']))
+    print('    network: tcp')
+    print('    tls: true')
+    print('    udp: true')
+    print('    flow: xtls-rprx-vision')
+    print('    servername: '+quote(n['sni']))
+    print('    client-fingerprint: chrome')
+    print('    reality-opts:')
+    print('      public-key: '+quote(n['public_key']))
+    print('      short-id: '+quote(n['short_id']))
+    print('      support-x25519mlkem768: true')
+    print()
+    print('Loon [Proxy] 配置（粘贴到 [Proxy] 段；需新版 Loon）：')
+    print(f'{n["name"]} = VLESS,{host},{n["port"]},{quote(n["uuid"])},'
+          f'transport=tcp,flow=xtls-rprx-vision,public-key={quote(n["public_key"])},'
+          f'short-id={n["short_id"]},over-tls=true,sni={n["sni"]},'
+          'tls-profile=chrome,udp=true')
 PY
 )" || die '找不到该节点。'
   kind="${result%%$'\n'*}"
-  url="${result#*$'\n'}"
+  result="${result#*$'\n'}"
+  url="${result%%$'\n'*}"
+  if [[ "$result" == *$'\n'* ]]; then
+    extras="${result#*$'\n'}"
+  fi
   say "节点：$name ($kind)"
   printf '\n分享链接：\n%s\n\n' "$url"
+  if [[ -n "$extras" ]]; then
+    printf '%s\n\n' "$extras"
+    warn 'Mihomo 的 ML-KEM 选项需要对应内核支持；Loon 使用自身的 TLS 指纹。'
+  fi
   if command -v qrencode >/dev/null 2>&1; then
     qrencode -t ANSIUTF8 -m 1 "$url" || warn '终端无法渲染二维码。'
     install -d -m 700 -o root -g root "$QR_DIR"
