@@ -41,11 +41,11 @@ ask() {
     *) echo "unexpected prompt: $1" >&2; exit 1 ;;
   esac
 }
-random_reality_sni() { printf 'unreliable.example\nstable.example\n'; }
+random_reality_sni() { printf 'unreliable.example 198.51.100.10\nstable.example 198.51.100.11\n'; }
 reality_smoke_test() {
   case "$1:$2" in
-    unreliable.example:unreliable.example:443) return 1 ;;
-    stable.example:stable.example:443) return 0 ;;
+    unreliable.example:198.51.100.10:443) return 1 ;;
+    stable.example:198.51.100.11:443) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -57,8 +57,8 @@ show_node() { :; }
 
 selected=''
 add_reality
-[[ "$selected" == 'stable.example|stable.example:443' ]] || {
+[[ "$selected" == 'stable.example|198.51.100.11:443' ]] || {
   printf 'Wrong REALITY SNI selection: %s\n' "$selected" >&2
   exit 1
 }
-echo 'Random REALITY selector correctly skipped a failed candidate'
+echo 'Random REALITY selector correctly skipped failed candidate and retained screened IPv4'
