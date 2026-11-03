@@ -9,7 +9,7 @@
 - 安装、更新、卸载由本脚本管理的 Xray，使用独立的 `xray-multi.service`。
 - 创建、查看、删除 **VLESS + Vision + REALITY** 节点。
 - 创建、查看、删除 **Shadowsocks 2022** 节点（TCP + UDP）。
-- 显示节点分享链接、终端二维码，生成 PNG 二维码。
+- 显示节点分享链接、终端二维码，生成 PNG 二维码；REALITY 节点同时输出 Mihomo YAML、Loon `[Proxy]` 配置以及旧版备用 VLESS 链接。
 - 创建 **A 服务器 IP:端口 → B 服务器 IP/域名:端口** 的 TCP、UDP 或 TCP+UDP 转发规则；转发由独立 **GOST v3** 服务承担，不再进入 Xray inbounds。
 - 给每个 Xray 代理节点单独设置 **累计上传 + 下载流量配额**，到额自动停用，支持清零恢复；GOST 转发不使用 Xray StatsService，因此当前不参与此配额。
 - REALITY 支持随机 SNI 候选、TLS 检测、按 VPS 出口地理位置偏好选取和 Cloudflare 网段排除；支持回落连接限速加固。
@@ -74,7 +74,7 @@ bash xray-manager.sh help
 | `03` | 新建 VLESS + REALITY |
 | `04` | 新建 Shadowsocks 2022 |
 | `05` | 查看代理节点列表 |
-| `06` | 查看分享链接 / 二维码 |
+| `06` | 查看分享链接 / 二维码；REALITY 可复制 Mihomo / Loon 配置 |
 | `07` | 删除指定代理节点 |
 | `08` / `09` | 查看服务状态 / 重启服务 |
 | `10` | REALITY 未认证回落限速加固 |
@@ -96,8 +96,21 @@ bash xray-manager.sh help
 4. 填写用于客户端分享链接的服务器公网 IP 或域名；脚本会尝试获取公网 IPv4 作为默认值。
 5. **REALITY 伪装目标 SNI**：默认输入 `random` 进行自动选择；也可以输入手工指定的真实域名。
 6. **REALITY 目标地址**：手动填写 SNI 时，默认采用 `所选SNI:443`；随机 SNI 时默认使用 TLS 初筛通过的 **IPv4:443**，并保留原域名作为 SNI，避免 Xray 实测/正式运行重新解析到不同的地址。固定 IP 可能随站点迁移而过期，需要在目标 IP 变动后新建或更新节点。可以手动改为域名，但会重新检测。
-7. 脚本验证配置后生成 UUID、密钥、Short ID，输出 `vless://` 分享链接和二维码。
+7. 脚本验证配置后生成 UUID、密钥、Short ID，输出带 `support-x25519mlkem768=true` 的 `vless://` 分享链接和二维码，以及一条不带该扩展参数的备用链接、Mihomo YAML 和 Loon 原生节点配置。
 8. 在客户端导入链接，并在安全组 / 防火墙放行服务端对应 **TCP** 端口。
+
+### 分享链接 / Mihomo / Loon 兼容
+
+通过菜单 `06` 或 `sudo bash xray-manager.sh show 节点名` 可以重新查看已有节点的分享链接；**不需要删除或重新创建节点，也不会更新 Xray 内核**。REALITY 节点会输出：
+
+- **主 VLESS 链接和二维码**：在常用 `pbk`、`sid`、`sni`、`fp` 等参数之外，增加 `support-x25519mlkem768=true`，新版 Mihomo 导入时可以把这个提示转换为 REALITY 配置。其它客户端是否读取此扩展参数取决于实现，不能仅凭 URI 带参就断言生效。
+- **备用原始 VLESS 链接**：不包含上述扩展参数，给旧版 Xray / 老客户端等不支持 ML-KEM 的环境留退路。不要将 ML-KEM 开关视为对所有旧版服务端兼容的设置。
+- **Mihomo YAML**：可复制到 Mihomo 配置，明确带 `reality-opts.support-x25519mlkem768: true`、`client-fingerprint: chrome`、Public Key 和 Short ID。纯数字 Short ID 始终输出为字符串，避免 YAML 自动转成数值而丢失前导零。
+- **Loon 配置**：按 Loon 官方 VLESS Vision + Reality 格式生成 `名称 = VLESS,...,transport=tcp,flow=xtls-rprx-vision,public-key=...,short-id=...,over-tls=true,sni=...,tls-profile=chrome`，复制到 Loon 配置的 `[Proxy]` 段。Loon 不使用 Mihomo 专属 `support-x25519mlkem768` 开关；需要使用支持 REALITY 与适当 TLS 指纹的新版 Loon。
+
+若通过 **SublinkPro 等订阅转换工具** 再导入，转换步骤可能不保留 URL 扩展参数；请检查最终 Mihomo 配置中的 `reality-opts`，或者直接使用脚本输出的 Mihomo YAML。此功能仅修改**客户端分享信息**，不改变服务器 REALITY 配置、UUID、密钥或 SNI，也不影响 Shadowsocks 2022 的 `ss://` 分享链接。
+
+Mihomo 配置参考：<https://wiki.metacubex.one/config/proxies/tls/>；Loon 格式参考：<https://nsloon.app/docs/Node/>。
 
 ### REALITY 随机 SNI 的选择逻辑
 
