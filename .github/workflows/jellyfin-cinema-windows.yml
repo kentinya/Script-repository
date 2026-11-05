@@ -1,0 +1,48 @@
+name: Jellyfin Cinema Windows installer RC1
+on:
+  push:
+    branches: [build/jellyfin-cinema-v1-rc1]
+    paths:
+      - 'jellyfin-cinema/**'
+      - '.github/workflows/jellyfin-cinema-windows.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: jellyfin-cinema
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Ensure Jellyfin source is present
+        shell: pwsh
+        run: |
+          if (!(Test-Path pubspec.yaml) -or !(Test-Path lib/main.dart)) {
+            throw "Jellyfin Cinema source not uploaded to jellyfin-cinema/. Upload the V1.0 RC1 source before building."
+          }
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+      - name: Analyze test and build Windows
+        shell: pwsh
+        run: ./tool/check_windows.ps1
+      - name: Build installer and portable release
+        shell: pwsh
+        run: ./tool/package_windows.ps1 -RequireInstaller
+      - name: Verify hashes
+        shell: pwsh
+        run: ./tool/verify_release.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Jellyfin-Cinema-RC1-Windows
+          path: |
+            jellyfin-cinema/dist/*.exe
+            jellyfin-cinema/dist/*.zip
+            jellyfin-cinema/dist/SHA256SUMS.txt
+          if-no-files-found: error
