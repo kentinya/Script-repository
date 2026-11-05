@@ -27,6 +27,9 @@ jobs:
           [IO.File]::WriteAllBytes('source.tar.xz', [Convert]::FromBase64String($encoded))
           tar -xJf source.tar.xz
           if ($LASTEXITCODE -ne 0) { throw 'Source archive extraction failed' }
+      - name: Apply Flutter compatibility corrections
+        shell: pwsh
+        run: python patch_rc1.py
       - name: Ensure Jellyfin source is present
         shell: pwsh
         run: |
