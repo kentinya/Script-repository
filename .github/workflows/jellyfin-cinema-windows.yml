@@ -20,11 +20,18 @@ jobs:
         with:
           channel: stable
           cache: true
+      - name: Unpack uploaded Jellyfin source
+        shell: pwsh
+        run: |
+          $encoded = (Get-Content -LiteralPath source.tar.xz.b64 -Raw).Trim()
+          [IO.File]::WriteAllBytes('source.tar.xz', [Convert]::FromBase64String($encoded))
+          tar -xJf source.tar.xz
+          if ($LASTEXITCODE -ne 0) { throw 'Source archive extraction failed' }
       - name: Ensure Jellyfin source is present
         shell: pwsh
         run: |
           if (!(Test-Path pubspec.yaml) -or !(Test-Path lib/main.dart)) {
-            throw "Jellyfin Cinema source not uploaded to jellyfin-cinema/. Upload the V1.0 RC1 source before building."
+            throw "Jellyfin Cinema source could not be extracted."
           }
       - name: Install Inno Setup
         shell: pwsh
