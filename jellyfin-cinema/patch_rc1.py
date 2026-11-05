@@ -55,4 +55,15 @@ void main() {
   });
 }
 """, encoding='utf-8')
-print('Applied RC1 compilation corrections.')
+# This mock payload contains Chinese subtitle metadata. http.Response defaults to
+# latin1 unless a UTF-8 content-type is supplied, so the mock must match
+# Jellyfin's JSON response encoding. Otherwise the mock throws synchronously
+# and the API correctly classifies that exception as a network failure.
+p = Path('test/source_selection_test.dart')
+s = p.read_text(encoding='utf-8')
+old = "      ]}), 200);"
+new = "      ]}), 200, headers: {'content-type': 'application/json; charset=utf-8'});"
+if s.count(old) != 1:
+    raise RuntimeError('Expected one playback-info mock response, found ' + str(s.count(old)))
+p.write_text(s.replace(old, new), encoding='utf-8')
+print('Applied RC1 compilation and UTF-8 mock-response corrections.')
