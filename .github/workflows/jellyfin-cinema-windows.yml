@@ -23,7 +23,7 @@ jobs:
       - name: Unpack uploaded Jellyfin source
         shell: pwsh
         run: |
-          $encoded = (Get-Content -LiteralPath source.tar.xz.b64 -Raw).Trim()
+          $encoded = (Get-Content -LiteralPath source-ascii.tar.xz.b64 -Raw).Trim()
           [IO.File]::WriteAllBytes('source.tar.xz', [Convert]::FromBase64String($encoded))
           tar -xJf source.tar.xz
           if ($LASTEXITCODE -ne 0) { throw 'Source archive extraction failed' }
