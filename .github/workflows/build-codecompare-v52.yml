@@ -67,13 +67,8 @@ jobs:
           python patch_gui.py
           python patch_report.py
 
-      - name: Apply verified v5.6 file mode GUI patch
-        shell: powershell
-        run: |
-          python -c "from pathlib import Path; import base64,lzma,hashlib; files=sorted(Path('codecompare-build').glob('v56fix_*.b64')); assert len(files)==4; txt=''.join(p.read_text(encoding='ascii').strip() for p in files); patch=lzma.decompress(base64.b64decode(txt)); expected='898c860cdf48312d268be1269dbe1ca84f10d97148a7359b12a991e1c7124acb'; assert hashlib.sha256(patch).hexdigest()==expected, 'GUI patch transfer mismatch'; Path('v56_gui.patch').write_bytes(patch); print('v5.6 patch verified')"
-          git apply --check v56_gui.patch
-          git apply v56_gui.patch
-          python -c "from pathlib import Path; import hashlib; digest=hashlib.sha256(Path('code_compare_gui.py').read_bytes()).hexdigest(); print('v5.6 GUI sha256',digest); assert digest=='0f18118cdc96ad2e12c5b9b1aef35a05797cb207ec6ee84353844f4b122e6007', 'GUI differs from tested source'"
+      - name: Apply v5.6 path-type auto-detection patch
+        run: python codecompare-build/patch_v56_runtime.py
 
       - name: Verify Python syntax
         run: python -m py_compile code_compare_core.py content_diff.py code_compare_gui.py report_export.py
