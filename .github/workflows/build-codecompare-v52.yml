@@ -1,9 +1,9 @@
-name: Build CodeCompareTool v5.4 EXE
+name: Build CodeCompareTool v5.5 EXE
 
 on:
   push:
     branches:
-      - build/codecompare-v5.2-exe-20260911
+      - build/codecompare-v5.5-exe-20261118
   workflow_dispatch:
 
 jobs:
@@ -57,8 +57,16 @@ jobs:
           python -c "from pathlib import Path; import base64,gzip; files=sorted(Path('codecompare-build').glob('v54s2_*.b64')); data=''.join(p.read_text(encoding='ascii').strip() for p in files); raw=gzip.decompress(base64.b64decode(data)); Path('patch_v54.py').write_bytes(raw); print('script bytes',len(raw))"
           python patch_v54.py
 
+      - name: Apply v5.5 file and smart content comparison patch
+        shell: powershell
+        run: |
+          python -c "import base64,hashlib,io,lzma,tarfile; from pathlib import Path; parts=sorted(Path('codecompare-build').glob('v55p_*.b64')); assert len(parts)==12, len(parts); raw=base64.b64decode(''.join(p.read_text(encoding='ascii').strip() for p in parts)); digest=hashlib.sha256(raw).hexdigest(); assert digest=='11a9275f78a4f1d5d059f95c80fce9fa70d0d0a8090c1d8b45c48ad786bde3ab',digest; tf=tarfile.open(fileobj=io.BytesIO(lzma.decompress(raw))); tf.extractall('.'); print('v55 patch bundle verified',len(parts))"
+          python patch_core.py
+          python patch_gui.py
+          python patch_report.py
+
       - name: Verify Python syntax
-        run: python -m py_compile code_compare_core.py code_compare_gui.py report_export.py
+        run: python -m py_compile code_compare_core.py content_diff.py code_compare_gui.py report_export.py
 
       - name: Smoke test nested matching and progress
         shell: powershell
@@ -68,6 +76,11 @@ jobs:
           Set-Content -Encoding ascii test_left\B\B.c "int x = 1;"
           Set-Content -Encoding ascii test_right\B.c "int x = 2;"
           python -c "from pathlib import Path; from code_compare_core import compare_directories; e=[]; r=compare_directories(Path('test_left'),Path('test_right'),progress_callback=lambda *x:e.append(x)); assert len(r)==1 and r[0].left_path and r[0].right_path and r[0].status=='MODIFIED'; assert any(x[0]=='compare' for x in e) and e[-1][0]=='done'; print('nested-match-ok', r[0].status, len(e))"
+
+      - name: Smoke test move-aware file comparison
+        shell: powershell
+        run: |
+          python -c "from pathlib import Path; from code_compare_core import compare_files; a=Path('old_test.h'); b=Path('new_test.h'); a.write_text('#define A 1\n#define B 2\n#define C 3\n',encoding='utf-8'); b.write_text('#define C 3\n#define A 1\n#define B 20\n',encoding='utf-8'); r=compare_files(a,b)[0]; assert r.status=='MODIFIED' and r.changed_lines==1 and r.added_lines==0 and r.deleted_lines==0 and r.moved_lines>0, r; b.write_text('#define C 3\n#define A 1\n#define B 2\n',encoding='utf-8'); r=compare_files(a,b)[0]; assert r.status=='MOVED_ONLY' and r.changed_lines==0, r; print('file-mode-and-moves-ok')"
 
       - name: Install build dependencies
         run: python -m pip install --upgrade pip pyinstaller openpyxl
@@ -86,7 +99,7 @@ jobs:
       - name: Upload EXE
         uses: actions/upload-artifact@v4
         with:
-          name: CodeCompareTool_v5.4_Windows_x64
+          name: CodeCompareTool_v5.5_Windows_x64
           path: dist/CodeCompareTool.exe
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
