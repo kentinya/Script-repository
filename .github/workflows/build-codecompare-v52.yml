@@ -59,8 +59,21 @@ jobs:
           python -c "from pathlib import Path; import base64,gzip; files=sorted(Path('codecompare-build').glob('v54s2_*.b64')); data=''.join(p.read_text(encoding='ascii').strip() for p in files); raw=gzip.decompress(base64.b64decode(data)); Path('patch_v54.py').write_bytes(raw); print('script bytes',len(raw))"
           python patch_v54.py
 
-      - name: Reconstruct v5.6 fixed modules with SHA-256 verification
-        run: python codecompare-build/build_v56.py
+      - name: Apply v5.5 file and smart content comparison patch
+        shell: powershell
+        run: |
+          python -c "import base64,hashlib,io,lzma,tarfile; from pathlib import Path; parts=sorted(Path('codecompare-build').glob('v55p_*.b64')); assert len(parts)==12, len(parts); raw=base64.b64decode(''.join(p.read_text(encoding='ascii').strip() for p in parts)); digest=hashlib.sha256(raw).hexdigest(); assert digest=='11a9275f78a4f1d5d059f95c80fce9fa70d0d0a8090c1d8b45c48ad786bde3ab',digest; tf=tarfile.open(fileobj=io.BytesIO(lzma.decompress(raw))); tf.extractall('.'); print('v55 patch bundle verified',len(parts))"
+          python patch_core.py
+          python patch_gui.py
+          python patch_report.py
+
+      - name: Apply verified v5.6 file mode GUI patch
+        shell: powershell
+        run: |
+          python -c "from pathlib import Path; import base64,lzma,hashlib; files=sorted(Path('codecompare-build').glob('v56fix_*.b64')); assert len(files)==4; txt=''.join(p.read_text(encoding='ascii').strip() for p in files); patch=lzma.decompress(base64.b64decode(txt)); expected='898c860cdf48312d268be1269dbe1ca84f10d97148a7359b12a991e1c7124acb'; assert hashlib.sha256(patch).hexdigest()==expected, 'GUI patch transfer mismatch'; Path('v56_gui.patch').write_bytes(patch); print('v5.6 patch verified')"
+          git apply --check v56_gui.patch
+          git apply v56_gui.patch
+          python -c "from pathlib import Path; import hashlib; digest=hashlib.sha256(Path('code_compare_gui.py').read_bytes()).hexdigest(); print('v5.6 GUI sha256',digest); assert digest=='0f18118cdc96ad2e12c5b9b1aef35a05797cb207ec6ee84353844f4b122e6007', 'GUI differs from tested source'"
 
       - name: Verify Python syntax
         run: python -m py_compile code_compare_core.py content_diff.py code_compare_gui.py report_export.py
@@ -79,7 +92,7 @@ jobs:
         run: |
           python -c "from pathlib import Path; from code_compare_core import compare_files; a=Path('old_test.h'); b=Path('new_test.h'); a.write_text('#define A 1\n#define B 2\n#define C 3\n',encoding='utf-8'); b.write_text('#define C 3\n#define A 1\n#define B 20\n',encoding='utf-8'); r=compare_files(a,b)[0]; assert r.status=='MODIFIED' and r.changed_lines==1 and r.added_lines==0 and r.deleted_lines==0 and r.moved_lines>0, r; b.write_text('#define C 3\n#define A 1\n#define B 2\n',encoding='utf-8'); r=compare_files(a,b)[0]; assert r.status=='MOVED_ONLY' and r.changed_lines==0, r; print('file-mode-and-moves-ok')"
 
-      - name: Smoke test file paths and automatic file-mode resolution
+      - name: Smoke test file path auto-detection
         shell: powershell
         run: |
           Set-Content -Encoding ascii old_header.h "#define TEST 100"
