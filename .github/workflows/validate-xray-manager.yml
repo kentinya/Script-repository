@@ -36,6 +36,8 @@ jobs:
         run: bash xray/tests/check-reality-selection.sh
       - name: Test Mihomo/Loon client exports
         run: bash xray/tests/check-client-exports.sh
+      - name: Test VLESS Encryption configuration and exports
+        run: bash xray/tests/check-vlessenc.sh
       - name: Test generated quota configuration
         run: bash xray/tests/check-node-quota.sh
       - name: Test GOST forwarding configuration
