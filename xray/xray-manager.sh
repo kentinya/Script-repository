@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Xray 多节点管理器 v1.6：VLESS + Vision + REALITY / Shadowsocks 2022
+# Xray 多节点管理器 v1.7：VLESS + Vision + REALITY / VLESS Encryption / Shadowsocks 2022
 # 支持 Linux + systemd，建议 Debian 12 / Ubuntu 22.04+ / Rocky Linux 9。
 # 使用：sudo bash xray-manager.sh    或 sudo bash xray-manager.sh help
 set -Eeuo pipefail
@@ -108,7 +108,7 @@ PY_NODE_COUNT
   printf '%s' "$UI_ACCENT"
   cat <<'EOF_UI_BANNER'
   ╭──────────────────────────────────────────────────────────────╮
-  │  ◆  X R A Y   M U L T I                            v1.6     │
+  │  ◆  X R A Y   M U L T I                            v1.7     │
   │     多协议 · 多节点 · 一站式安全管理                          │
   ╰──────────────────────────────────────────────────────────────╯
 EOF_UI_BANNER
@@ -125,6 +125,7 @@ EOF_UI_BANNER
     "$UI_ACCENT" "$UI_RESET" "$UI_ACCENT" "$UI_RESET"
   printf '  %s[05]%s  节点列表                  %s[06]%s  分享链接 / 二维码\n' \
     "$UI_ACCENT" "$UI_RESET" "$UI_ACCENT" "$UI_RESET"
+  ui_item '18' '新建 VLESS Encryption + Vision'
   ui_item '07' '删除指定节点'
   ui_section '服务与安全'
   printf '  %s[08]%s  查看服务状态              %s[09]%s  重启 Xray 服务\n' \
@@ -500,16 +501,17 @@ release_config_lock() {
 make_candidate() {
   local action="$1" name="$2" kind="${3:-}" port="${4:-}" host="${5:-}" \
         uuid="${6:-}" priv="${7:-}" pub="${8:-}" sid="${9:-}" \
-        sni="${10:-}" dest="${11:-}" method="${12:-}" psk="${13:-}"
+        sni="${10:-}" dest="${11:-}" method="${12:-}" psk="${13:-}" \
+        decryption="${14:-}" encryption="${15:-}"
   local candidate_db="$DATA_DIR/.nodes.pending.json" candidate_config="$CONF_DIR/.config.pending.json"
   exec {CONFIG_LOCK_FD}>"$DATA_DIR/.config-operation.lock"
   flock -x "$CONFIG_LOCK_FD" || die '无法取得配置修改锁'
   rm -f "$candidate_db" "$candidate_config"
   python3 - "$DB" "$candidate_db" "$candidate_config" "$TRAFFIC_STATE" "$STATS_PORT" \
     "$action" "$name" "$kind" "$port" "$host" "$uuid" "$priv" "$pub" \
-    "$sid" "$sni" "$dest" "$method" "$psk" <<'PY'
+    "$sid" "$sni" "$dest" "$method" "$psk" "$decryption" "$encryption" <<'PY'
 import json,sys,os
-(db_path,new_db,new_conf,traffic_path,stats_port,action,name,kind,port,host,uuid,priv,pub,sid,sni,dest,method,psk)=sys.argv[1:]
+(db_path,new_db,new_conf,traffic_path,stats_port,action,name,kind,port,host,uuid,priv,pub,sid,sni,dest,method,psk,decryption,encryption)=sys.argv[1:]
 with open(db_path,encoding='utf-8') as f:
     db=json.load(f)
 nodes=db['nodes']
@@ -519,6 +521,10 @@ if action=='add':
     node=dict(name=name,kind=kind,port=int(port),host=host)
     if kind=='reality':
         node.update(uuid=uuid,private_key=priv,public_key=pub,short_id=sid,sni=sni,dest=dest)
+    elif kind=='vlessenc':
+        if not (decryption.startswith('mlkem768x25519plus.') and encryption.startswith('mlkem768x25519plus.')):
+            raise ValueError('VLESS Encryption 密钥格式无效')
+        node.update(uuid=uuid,decryption=decryption,encryption=encryption)
     elif kind=='ss2022':
         node.update(method=method,password=psk)
     elif kind=='forward':
@@ -581,6 +587,15 @@ for n in nodes:
                 'limitFallbackUpload':n['fallback_limit']['upload'],
                 'limitFallbackDownload':n['fallback_limit']['download']
             }},
+            'sniffing':{'enabled':True,'destOverride':['http','tls','quic'],'routeOnly':True}
+        })
+    elif n['kind']=='vlessenc':
+        inbounds.append({
+            'tag':'vlessenc-'+n['name'], 'listen':'0.0.0.0', 'port':n['port'],
+            'protocol':'vless',
+            'settings':{'clients':[{'id':n['uuid'],'flow':'xtls-rprx-vision'}],
+                        'decryption':n['decryption']},
+            'streamSettings':{'network':'tcp','security':'none'},
             'sniffing':{'enabled':True,'destOverride':['http','tls','quic'],'routeOnly':True}
         })
     elif n['kind']=='ss2022':
@@ -1357,6 +1372,69 @@ PY_REALITY_NODE
   info '本机 REALITY + Vision 实测通过；仍需检查公网端口、防火墙及客户端配置。'
 }
 
+# 原生 VLESS Encryption：将 xray vlessenc 的同一认证方式的两端密钥配对，
+# 服务端 decryption 保存于 root-only 节点数据库，客户端仅输出 encryption。
+add_vlessenc() {
+  require_installed
+  say '新增 VLESS Encryption + Vision 节点（TCP，无 TLS/REALITY）'
+  ask_base 443
+  local raw auth handshake uuid decryption encryption
+  local -a pair=()
+  printf '认证密钥：\n  1) X25519（默认，分享链接较短；握手仍是后量子安全）\n  2) ML-KEM-768（后量子身份认证；链接及二维码较长）\n'
+  ask auth '选择认证方式' '1'
+  case "$auth" in
+    1|2) ;;
+    *) die '无效认证方式。' ;;
+  esac
+  printf '客户端握手：\n  1) 1-RTT（默认，每次完整握手，可靠性优先）\n  2) 0-RTT（会话恢复，首次连接仍完整握手）\n'
+  ask handshake '选择握手方式' '1'
+  case "$handshake" in
+    1|2) ;;
+    *) die '无效握手方式。' ;;
+  esac
+  raw="$("$BIN" vlessenc 2>/dev/null)" \
+    || die '本机 Xray 不支持 vlessenc 命令；请手动安装支持 VLESS Encryption 的新版 Xray（不会自动下载）。'
+  # vlessenc 输出两套配置：先 X25519，后 ML-KEM-768，绝不能混用。
+  mapfile -t pair < <(python3 - "$auth" "$handshake" "$raw" <<'PY_VLESSENC'
+import re,sys
+auth,rtt,raw=sys.argv[1:]
+matches=re.findall(r'"(decryption|encryption)"\s*:\s*"([^"\n]+)"',raw)
+pairs=[]
+pending=None
+for field,value in matches:
+    if field=='decryption':
+        pending={'decryption':value}
+    elif pending is not None and 'encryption' not in pending:
+        pending['encryption']=value
+        pairs.append(pending)
+        pending=None
+if len(pairs)!=2:
+    sys.exit('无法识别 xray vlessenc 的两套密钥输出')
+selected=pairs[int(auth)-1]
+dec,enc=selected['decryption'],selected['encryption']
+if not (dec.startswith('mlkem768x25519plus.native.600s.') and
+        enc.startswith('mlkem768x25519plus.native.0rtt.')):
+    sys.exit('xray vlessenc 密钥格式发生变化，请更新脚本')
+if rtt=='1':
+    enc=enc.replace('.0rtt.','.1rtt.',1)
+if any(c.isspace() for c in dec+enc):
+    sys.exit('密钥字段包含无效空白字符')
+print(dec)
+print(enc)
+PY_VLESSENC
+)
+  ((${#pair[@]} == 2)) || die '解析 xray vlessenc 输出失败；未创建任何节点。'
+  decryption="${pair[0]}"
+  encryption="${pair[1]}"
+  [[ -n "$decryption" && -n "$encryption" ]] || die 'VLESS Encryption 密钥不完整。'
+  uuid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  make_candidate add "$NODE_NAME" vlessenc "$NODE_PORT" "$NODE_HOST" "$uuid" '' '' '' '' '' '' '' "$decryption" "$encryption"
+  apply_candidate || die 'VLESS Encryption 节点创建失败。'
+  info 'VLESS Encryption 节点已创建并启动。'
+  show_node "$NODE_NAME"
+  warn '请在云厂商安全组 / 系统防火墙放行该 TCP 端口；客户端必须支持 VLESS Encryption。'
+}
+
 add_ss() {
   require_installed
   say '新增 Shadowsocks 2022 节点'
@@ -1578,12 +1656,39 @@ if n['kind']=='reality':
     q=urllib.parse.urlencode({**params,'support-x25519mlkem768':'true'})
     url=f"{base}?{q}#{frag}"
     legacy=f"{base}?{urllib.parse.urlencode(params)}#{frag}"
+elif n['kind']=='vlessenc':
+    params={'encryption':n['encryption'],'flow':'xtls-rprx-vision',
+            'security':'none','type':'tcp'}
+    base=f"vless://{n['uuid']}@{host}:{n['port']}"
+    url=f"{base}?{urllib.parse.urlencode(params)}#{frag}"
 else:
     u=f"{n['method']}:{n['password']}".encode()
     b64=base64.urlsafe_b64encode(u).decode().rstrip('=')
     url=f"ss://{b64}@{host}:{n['port']}#{frag}"
 print(n['kind'])
 print(url)
+if n['kind']=='vlessenc':
+    quote=lambda value:json.dumps(str(value),ensure_ascii=False)
+    print()
+    print('Mihomo YAML（加密参数必须原样保留）：')
+    print('proxies:')
+    print('  - name: '+quote(n['name']))
+    print('    type: vless')
+    print('    server: '+quote(n['host']))
+    print('    port: '+str(n['port']))
+    print('    uuid: '+quote(n['uuid']))
+    print('    network: tcp')
+    print('    tls: false')
+    print('    udp: true')
+    print('    flow: xtls-rprx-vision')
+    print('    encryption: '+quote(n['encryption']))
+    print()
+    print('Xray 客户端 outbound JSON：')
+    client={'protocol':'vless','settings':{
+        'address':n['host'],'port':n['port'],'id':n['uuid'],
+        'encryption':n['encryption'],'flow':'xtls-rprx-vision'},
+        'streamSettings':{'network':'tcp','security':'none'}}
+    print(json.dumps(client,ensure_ascii=False,indent=2))
 if n['kind']=='reality':
     quote=lambda value:json.dumps(str(value),ensure_ascii=False)
     print()
@@ -1625,7 +1730,11 @@ PY
   printf '\n分享链接：\n%s\n\n' "$url"
   if [[ -n "$extras" ]]; then
     printf '%s\n\n' "$extras"
-    warn 'Mihomo 的 ML-KEM 选项需要对应内核支持；Loon 使用自身的 TLS 指纹。'
+    if [[ "$kind" == reality ]]; then
+      warn 'Mihomo 的 ML-KEM 选项需要对应内核支持；Loon 使用自身的 TLS 指纹。'
+    elif [[ "$kind" == vlessenc ]]; then
+      warn '纯 TCP VLESS Encryption 不使用 TLS/REALITY；部分旧客户端、Loon 或订阅转换器可能不支持该 encryption 字段。'
+    fi
   fi
   if command -v qrencode >/dev/null 2>&1; then
     qrencode -t ANSIUTF8 -m 1 "$url" || warn '终端无法渲染二维码。'
@@ -1720,13 +1829,14 @@ uninstall_all() {
 
 help_text() {
   cat <<'EOF'
-Xray 多配置管理器 v1.6（需要 root，Linux + systemd）
+Xray 多配置管理器 v1.7（需要 root，Linux + systemd）
 
 用法：sudo bash xray-manager.sh [命令] [节点名]
   不传参数        彩色中文交互菜单（文本输入支持左右方向键）
   install         安装 / 更新 Xray（官方最新正式版，验证 SHA256）
   update          同 install
   add-reality     新增 VLESS + Vision + REALITY
+  add-vlessenc    新增 VLESS Encryption + Vision（TCP，支持 X25519 / ML-KEM-768 认证）
   reality-check 节点名   检测现有 REALITY 节点 SNI/目标（不修改配置）
   add-ss          新增 Shadowsocks 2022 (TCP + UDP)
   list            列出所有节点
@@ -1786,7 +1896,7 @@ menu() {
   local choice
   while :; do
     ui_home
-    ui_read choice "  › 请选择操作 [01-17 / 00 / Q]: " || break
+    ui_read choice "  › 请选择操作 [01-18 / 00 / Q]: " || break
     case "$choice" in
       1|01|2|02) install_xray ;;
       3|03) add_reality ;;
@@ -1804,6 +1914,7 @@ menu() {
       15) traffic_set '' '' ;;
       16) traffic_reset '' ;;
       17) check_reality_node '' ;;
+      18) add_vlessenc ;;
       0|00) uninstall_all ;;
       q|Q|quit|exit) break ;;
       *) warn '无效选项：请输入菜单中的编号。' ;;
@@ -1822,6 +1933,7 @@ main() {
     menu) menu ;;
     install|update) install_xray ;;
     add-reality) add_reality ;;
+    add-vlessenc) add_vlessenc ;;
     reality-check) check_reality_node "${2:-}" ;;
     add-ss) add_ss ;;
     list) node_names ;;
