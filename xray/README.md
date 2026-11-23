@@ -1,4 +1,4 @@
-# Xray Multi 多节点管理器使用说明（v1.6）
+# Xray Multi 多节点管理器使用说明（v1.7）
 
 > 适用脚本：[xray-manager.sh](./xray-manager.sh)｜仓库首页：[README](../README.md)
 >
@@ -8,6 +8,7 @@
 
 - 安装、更新、卸载由本脚本管理的 Xray，使用独立的 `xray-multi.service`。
 - 创建、查看、删除 **VLESS + Vision + REALITY** 节点。
+- 创建、查看、删除 **VLESS Encryption + Vision** 节点（原生 TCP、可选 X25519 / ML-KEM-768 身份认证和 1-RTT / 0-RTT 握手）。
 - 创建、查看、删除 **Shadowsocks 2022** 节点（TCP + UDP）。
 - 显示节点分享链接、终端二维码，生成 PNG 二维码；REALITY 节点同时输出 Mihomo YAML、Loon `[Proxy]` 配置以及旧版备用 VLESS 链接。
 - 创建 **A 服务器 IP:端口 → B 服务器 IP/域名:端口** 的 TCP、UDP 或 TCP+UDP 转发规则；转发由独立 **GOST v3** 服务承担，不再进入 Xray inbounds。
@@ -72,6 +73,7 @@ bash xray-manager.sh help
 | --- | --- |
 | `01` / `02` | 安装 / 更新 Xray |
 | `03` | 新建 VLESS + REALITY |
+| `18` | 新建 VLESS Encryption + Vision（TCP） |
 | `04` | 新建 Shadowsocks 2022 |
 | `05` | 查看代理节点列表 |
 | `06` | 查看分享链接 / 二维码；REALITY 可复制 Mihomo / Loon 配置 |
@@ -152,6 +154,35 @@ sudo bash xray-manager.sh reality-check reality-hk
 该命令读取节点当前的 SNI 与 REALITY 目标，先执行 TLS + Cloudflare 检测，再通过临时本机 REALITY 链路对公网 HTTPS 目标进行两次 TLS/h2 数据收发测试。**不会修改或重启原有服务**。如果旧节点实测失败，可新建节点，确认连接后更新客户端分享链接，再删除旧节点。新建节点会生成新 UUID、密钥和 Short ID，旧连接不会自动迁移。
 
 检查通过也不能保证旧客户端可用；请同时核实公网端口、安全组、防火墙、客户端版本及两端系统时间。
+
+## 5A. 新建 VLESS Encryption + Vision 节点
+
+VLESS Encryption 使用 Xray 内置的 **ML-KEM-768 + X25519 后量子混合密钥交换**。与 REALITY 的 TLS 伪装不同，本功能新建独立的 **VLESS + TCP + Vision + Encryption** 入站，传输层采用 `security: none`，但 VLESS 协议本身启用加密。它**不是**在 REALITY 节点上追加一个参数。
+
+运行：
+
+~~~bash
+sudo bash xray-manager.sh add-vlessenc
+~~~
+
+或菜单选择 `18`。输入节点名、监听端口、分享用 IP/域名后，选择：
+
+- **认证方式**：`1` X25519（默认，链接短；临时混合密钥交换仍有后量子安全性），或 `2` ML-KEM-768（身份认证也采用后量子算法，但链接、二维码明显更长）。
+- **握手方式**：`1` 1-RTT（默认，每次完成完整握手），或 `2` 0-RTT（后续连接可复用票据，服务端重启时可能需要重新连接）。
+
+脚本调用**本地** `/usr/local/bin/xray vlessenc`，从同一套认证方式的输出中取服务端 `decryption` 和客户端 `encryption`，不会下载或更新 Xray。旧版内核不支持此子命令时直接中止，不修改已有节点。服务端私密 `decryption` 只保存到 root 权限的节点数据库及 Xray 配置；**分享链接、Mihomo YAML 和 Xray 客户端 outbound JSON 仅包含客户端 `encryption`**。配置更新仍经过 Xray 测试与重启失败回滚。
+
+使用 `show 节点名` 随时重新导出链接、二维码、Mihomo YAML 和 Xray 客户端 outbound JSON：
+
+~~~bash
+sudo bash xray-manager.sh show enc-node
+~~~
+
+Mihomo 示例的关键字段：`type: vless`、`network: tcp`、`tls: false`、`flow: xtls-rprx-vision`，以及完整的 `encryption: "mlkem768x25519plus.native.1rtt.…"`（需填入**真实生成的客户端字符串**）。单节点流量配额、查看和删除均可使用现有命令；服务器需开放相应 **TCP** 端口。
+
+**兼容性**：客户端必须真正支持 VLESS Encryption，不能只识别普通 VLESS URI。Mihomo 新版有对应的 `encryption` 字段；不同客户端 / Loon / 订阅转换器可能丢失该字段或不支持组合，请以导出的 Mihomo YAML / Xray JSON 为准，并自行验证实际连接。不支持时请继续使用原有 REALITY 节点，不要删除它来替换。原生加密并不提供 REALITY 那样的 TLS/SNI 伪装。
+
+参考：[Xray 官方 VLESS 入站文档](https://xtls.github.io/config/inbounds/vless.html)、[VLESS 出站文档](https://xtls.github.io/config/outbounds/vless.html)、[Mihomo VLESS 文档](https://wiki.metacubex.one/config/proxies/vless/)。
 
 ## 6. 新建 Shadowsocks 2022 节点
 
